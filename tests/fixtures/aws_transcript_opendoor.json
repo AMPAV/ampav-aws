@@ -1,0 +1,126 @@
+{
+  "jobName": "ampav-aws-transcribe-test-OpenDoor",
+  "accountId": "000000000000",
+  "status": "COMPLETED",
+  "results": {
+    "transcripts": [
+      {
+        "transcript": "Please open the door."
+      }
+    ],
+    "speaker_labels": {
+      "segments": [
+        {
+          "start_time": "0.0",
+          "end_time": "1.649",
+          "speaker_label": "spk_0",
+          "items": [
+            {
+              "speaker_label": "spk_0",
+              "start_time": "0.009",
+              "end_time": "0.449"
+            },
+            {
+              "speaker_label": "spk_0",
+              "start_time": "0.449",
+              "end_time": "0.81"
+            },
+            {
+              "speaker_label": "spk_0",
+              "start_time": "0.81",
+              "end_time": "1.009"
+            },
+            {
+              "speaker_label": "spk_0",
+              "start_time": "1.009",
+              "end_time": "1.5"
+            }
+          ]
+        }
+      ],
+      "channel_label": "ch_0",
+      "speakers": 1
+    },
+    "items": [
+      {
+        "id": 0,
+        "type": "pronunciation",
+        "alternatives": [
+          {
+            "confidence": "0.999",
+            "content": "Please"
+          }
+        ],
+        "start_time": "0.009",
+        "end_time": "0.449",
+        "speaker_label": "spk_0"
+      },
+      {
+        "id": 1,
+        "type": "pronunciation",
+        "alternatives": [
+          {
+            "confidence": "1.0",
+            "content": "open"
+          }
+        ],
+        "start_time": "0.449",
+        "end_time": "0.81",
+        "speaker_label": "spk_0"
+      },
+      {
+        "id": 2,
+        "type": "pronunciation",
+        "alternatives": [
+          {
+            "confidence": "1.0",
+            "content": "the"
+          }
+        ],
+        "start_time": "0.81",
+        "end_time": "1.009",
+        "speaker_label": "spk_0"
+      },
+      {
+        "id": 3,
+        "type": "pronunciation",
+        "alternatives": [
+          {
+            "confidence": "1.0",
+            "content": "door"
+          }
+        ],
+        "start_time": "1.009",
+        "end_time": "1.5",
+        "speaker_label": "spk_0"
+      },
+      {
+        "id": 4,
+        "type": "punctuation",
+        "alternatives": [
+          {
+            "confidence": "0.0",
+            "content": "."
+          }
+        ],
+        "speaker_label": "spk_0"
+      }
+    ],
+    "audio_segments": [
+      {
+        "id": 0,
+        "transcript": "Please open the door.",
+        "start_time": "0.0",
+        "end_time": "1.649",
+        "speaker_label": "spk_0",
+        "items": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    ]
+  }
+}
