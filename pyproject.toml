@@ -1,0 +1,31 @@
+[project]
+name = "ampav-aws_transcribe"
+version = "0.0.1"
+description = "AWS Transcribe tooling for the AMPAV environment"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+]
+authors = [
+    {name = "Ying Feng", email = "yingfeng@iu.edu"},
+]
+
+requires-python = ">=3.12"
+dependencies = [
+    "ampav-core>=0.0.12",
+    "boto3",
+]
+
+[project.urls]
+Homepage = "https://github.com/AMPAV/ampav-aws_transcribe"
+Repository = "https://github.com/AMPAV/ampav-aws_transcribe.git"
+Issues = "https://github.com/AMPAV/ampav-aws_transcribe/issues"
+
+[project.scripts]
+ampav_aws_transcribe = "ampav.aws_transcribe.transcribe:cli_aws_transcribe"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

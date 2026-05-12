@@ -1,0 +1,29 @@
+aws:
+  region: YOUR_AWS_REGION
+  # Prefer profile_name or the normal boto3 credential chain for local use.
+  # profile_name: YOUR_AWS_PROFILE
+  # aws_access_key_id: REPLACE_WITH_ACCESS_KEY
+  # aws_secret_access_key: REPLACE_WITH_SECRET_KEY
+  # aws_session_token: REPLACE_WITH_SESSION_TOKEN
+
+s3:
+  bucket: YOUR_TRANSCRIBE_BUCKET
+  input_prefix: aws_transcribe/input
+  output_prefix: aws_transcribe/output
+
+polling:
+  interval_seconds: 30
+  timeout_seconds: 7200
+
+transcription:
+  media_format: wav
+  language_code: en-US
+  identify_language: false
+  language_options: []
+  show_speaker_labels: true
+  max_speaker_labels: 10
+  job_name_prefix: ampav-aws-transcribe
+
+paths:
+  # Relative paths are resolved from the config file's directory.
+  runs_dir: PATH_TO_LOCAL_RUNS_DIR
