@@ -1,7 +1,7 @@
 [project]
-name = "ampav-aws_transcribe"
+name = "ampav-aws"
 version = "0.0.1"
-description = "AWS Transcribe tooling for the AMPAV environment"
+description = "AWS tooling for the AMPAV environment"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -19,12 +19,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/AMPAV/ampav-aws_transcribe"
-Repository = "https://github.com/AMPAV/ampav-aws_transcribe.git"
-Issues = "https://github.com/AMPAV/ampav-aws_transcribe/issues"
+Homepage = "https://github.com/AMPAV/ampav-aws"
+Repository = "https://github.com/AMPAV/ampav-aws.git"
+Issues = "https://github.com/AMPAV/ampav-aws/issues"
 
 [project.scripts]
-ampav_aws_transcribe = "ampav.aws_transcribe.transcribe:cli_aws_transcribe"
+ampav_aws_transcribe = "ampav.aws.transcribe:cli_aws_transcribe"
 
 [build-system]
 requires = ["setuptools"]

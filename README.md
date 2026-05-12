@@ -1,8 +1,8 @@
-# ampav-aws_transcribe
+# ampav-aws
 
-AWS Transcribe tooling for AMPAV.
+AWS tooling for AMPAV.
 
-## Usage
+## AWS Transcribe
 
 Create a real config from `examples/aws_config.example.yaml`, place it in a local runtime directory outside this repo, then run:
 
