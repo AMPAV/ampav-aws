@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# BDW: There really isn't a terrible need for most of these exceptions, let
+# alone a hierarchy.  Unless you're doing something really special, you 
+# likely just want to use the built-in exception classes.
 
 class AmpavAWSError(Exception):
     """Base class for AMPAV AWS package errors."""
@@ -53,6 +56,10 @@ def is_aws_sdk_error(exc: BaseException) -> bool:
     :return: ``True`` if the exception is a botocore/boto3 error.
     :rtype: bool
     """
+    # BDW: imports should aways happen at the top.  The only time they 
+    # wouldn't be is if they're optional (like I do with numpy in core) for
+    # the library.  Here, the library is actually loaded into python by boto3
+    # so putting this at the top of the file is the right thing to do.
     try:
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError:

@@ -10,6 +10,23 @@ from typing import Any
 
 from .errors import AWSArtifactError
 
+# BDW: ArtifactWriter should just be regular class -- it's not just passing
+# structured data around as a unit.  You also have a constructor that's outside
+# the class.  A more streamlined implemenation may be:
+
+class BDWArtifactWriter:
+    def __init__(self, run_dir: Path | None, timestamp: str = None, job_name: str = None):
+        self.run_dir: Path = run_dir
+        if run_dir is not None:
+            self.run_dir=create_run_directory(run_dir, timestamp, job_name)
+
+    # there's no need for the path method, because you can easily derive it
+    # via:   self.run_dir / "some_filename" and it's only used internally.
+
+    def write_json(self, name: str, data: Any) -> Path | None:
+        ...
+
+
 
 @dataclass
 class ArtifactWriter:
@@ -45,6 +62,13 @@ class ArtifactWriter:
         :rtype: Path | None
         :raises AWSArtifactError: If the file cannot be written.
         """
+        # BDW as mentioned above you don't need path so this can be written:
+        #if self.path:
+        #    p = selfpath / name
+        #    write_json(p, data)
+        #    return p
+        # None is the default return value....so no need to return it explicitly        
+
         path = self.path(name)
         if path is not None:
             write_json(path, data)
@@ -68,6 +92,10 @@ def create_artifact_writer(runs_dir: Path | None, timestamp: str, job_name: str)
         return ArtifactWriter(run_dir=None)
     return ArtifactWriter(run_dir=create_run_directory(runs_dir, timestamp, job_name))
 
+# BDW: this is really a function that should be left to the user.  You're making
+# a ton of assumptions on what the output directory should look like and be
+# named.  Let the user specify where they want the data to be placed and let
+# them create the directory for you.  
 
 def create_run_directory(runs_dir: Path, timestamp: str, job_name: str) -> Path:
     """Create a unique timestamped run artifact directory.
@@ -113,8 +141,15 @@ def write_json(path: Path, data: Any) -> None:
     :raises AWSArtifactError: If the file cannot be written.
     """
     try:
+        # utf-8 is the default encoding, so no need to specify it.  No need to
+        # append a newline.  
         path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
+        # alternately, it can be written like this which is more idiomatic:
+        #with open(path, "w") as f:
+        #    json.dump(data, f, indent=2)
     except OSError as exc:
+        # BDW: If it were me, I'd just let the error propigate upward as-is and
+        # skip the try/except block altogether.
         raise AWSArtifactError(f"Could not write artifact {path}: {exc}") from exc
 
 
@@ -127,6 +162,8 @@ def read_json(path: Path) -> Any:
     :rtype: Any
     :raises AWSArtifactError: If the file cannot be read or parsed.
     """
+    # BDW: let the individual exceptions work their way up and skip the
+    # try/except block entirely
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
