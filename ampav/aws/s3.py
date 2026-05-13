@@ -9,7 +9,15 @@ from typing import Any
 
 from .errors import AWSArtifactError
 
-
+# BDW: This really isn't necessary.  S3 locations are really just URL strings at
+# their heart, so they should be handled thus.  Also, this syntax precludes 
+# using anything other than AWS S3 -- because they will use "regular" urls, but
+# the syntax of the URL will vary depending on the provider. 
+#
+# The rest of the functions are just really thin wrappers on an s3_client and 
+# I'm not sure about the utility of them rather than just having the users
+# call the boto3 functions directly.
+#
 @dataclass(frozen=True)
 class S3Location:
     """A bucket/key pair identifying an object in S3.

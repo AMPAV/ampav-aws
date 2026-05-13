@@ -6,7 +6,8 @@ from typing import Any
 
 from .config import AWSSettings
 
-
+# BDW: this makes using boto3's default configuration stuff harder to use and
+# really isn't much more than a very thin wrapper around boto3.Session
 def create_boto3_session(settings: AWSSettings) -> Any:
     """Create a boto3 session from explicit, profile, or default-chain settings.
 
@@ -16,6 +17,7 @@ def create_boto3_session(settings: AWSSettings) -> Any:
     :rtype: Any
     :raises RuntimeError: If boto3 is not installed.
     """
+    # BDW: Import at top
     try:
         import boto3
     except ImportError as exc:
@@ -31,4 +33,13 @@ def create_boto3_session(settings: AWSSettings) -> Any:
         kwargs["aws_secret_access_key"] = settings.secret_access_key
         if settings.session_token:
             kwargs["aws_session_token"] = settings.session_token
+
+    # BDW: the utility of the function notwithstanding, what you're trying to
+    # do can be more easily be implemented as:
+    #return boto3.Session(region_name=settings.region,
+    #                     profile_name=settings.profile_name,
+    #                     aws_access_key_id=settings.access_key_id,
+    #                     aws_secret_access_key=settings.secret_access_key,
+    #                     aws_session_token=settings.session_token)
+    
     return boto3.Session(**kwargs)

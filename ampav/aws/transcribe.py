@@ -252,7 +252,6 @@ def load_config(config_path: Path) -> AWSTranscribeConfig:
     except ValidationError as exc:
         raise AWSConfigError(f"Invalid AWS Transcribe config {config_path}: {exc}") from exc
 
-
 def transcribe_file(audiofile: Path, config_path: Path, debug: bool = False) -> ToolOutput:
     """Transcribe a local file using config loaded from a YAML file.
 
@@ -679,7 +678,8 @@ def json_for_log(data: Any) -> str:
     """
     return json.dumps(data, default=str, sort_keys=True)
 
-
+# BDW: All(?) of your settings should be command line arguments.  You should be
+# able to pass an S3 location and credentials too
 def cli_aws_transcribe() -> None:
     """CLI entrypoint for AWS Transcribe."""
     parser = argparse.ArgumentParser()
@@ -697,6 +697,8 @@ def cli_aws_transcribe() -> None:
         logging.error("%s", exc)
         raise SystemExit(1) from exc
 
+    # BDW: All of the ampav schemas have a yaml dump:
+    # print(result.model_dump_yaml())
     print(pretty_yaml(result.model_dump(mode="json", exclude_none=True), sort_keys=False))
 
 

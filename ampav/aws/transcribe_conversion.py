@@ -10,6 +10,9 @@ from ampav.core.schema import ParagraphSegment, Transcript, WordSegment
 from .errors import AWSTranscriptSchemaError
 from .transcribe_contract import validate_aws_transcript_contract
 
+# BDW: Overall -- you're using isinstance() way too much here.  By the time
+# you get to the point you want to convert the AWS transcript to our Transcript
+# all of that should have been normalized.
 
 def aws_transcript_to_transcript(
     aws_transcript: dict[str, Any],
@@ -64,6 +67,22 @@ def aws_transcript_text(results: dict[str, Any], words: list[WordSegment]) -> st
             return first["transcript"]
     return words_to_text(words)
 
+# BDW: Here's a prime example where pre-normalizing the aws transcribe json
+# can be used to to your advantage to make this smaller and easier to understand.
+# this one function effectively replaces aws_items_to_words, 
+# aws_pronunciation_item_to_word, attach_punctuation, and first_alternative.
+from .transcribe_contract import AWSTranscribeResult
+def bdw_aws_items_to_words(aws: AWSTranscribeResult) -> list[WordSegment]:
+    res: list[WordSegment] = []
+    for w in aws.results.items:
+        if w.type == "punctuation":
+            res[-1].suffix = w.alternatives[0].content
+        else:
+            res.append(WordSegment(start_time=w.start_time,
+                                   end_time=w.end_time,
+                                   confidence=w.alternatives[0].confidence,
+                                   word=w.alternatives[0].content))
+    return res
 
 def aws_items_to_words(items: object) -> tuple[list[WordSegment], dict[int, WordSegment]]:
     """Convert AWS item entries into AMPAV word segments and an item-id map.
@@ -100,7 +119,6 @@ def aws_items_to_words(items: object) -> tuple[list[WordSegment], dict[int, Word
             logging.warning("Skipping unsupported AWS transcript item type: %s", item_type)
 
     return words, words_by_item_id
-
 
 def aws_pronunciation_item_to_word(item: dict[str, Any]) -> WordSegment:
     """Convert a single AWS pronunciation item into a WordSegment.
@@ -167,12 +185,18 @@ def first_alternative(item: dict[str, Any]) -> dict[str, Any]:
     :rtype: dict[str, Any]
     :raises ValueError: If no usable alternative exists.
     """
+    # BDW: It's my understanding that there is always one alternative, so you 
+    # could just write this (inline) as:
+    # item['alternatives'][0]
     alternatives = item.get("alternatives")
     if not isinstance(alternatives, list) or not alternatives or not isinstance(alternatives[0], dict):
         raise ValueError("AWS transcript item is missing alternatives")
     return alternatives[0]
 
-
+# BDW: if you have the whole aws transcript you don't need words_by_item_id
+# because they're just they're literally the identity of their position in
+# the array (I'm 99.9% sure of this after looking at the code), so you can 
+# just do an array lookup.
 def aws_results_to_paragraphs(
     results: dict[str, Any],
     words: list[WordSegment],
@@ -376,9 +400,13 @@ def word_in_time_range(word: WordSegment, start_time: float | None, end_time: fl
     """
     if start_time is None or end_time is None or word.start_time is None or word.end_time is None:
         return False
+    # BDW: python supports this structure:
+    # return start_time <= word.start_time <= end_time
     return start_time <= word.start_time and word.end_time <= end_time
 
 
+# BDW: I think I've used the id function twice it the years I've used python.
+# equality should suffice.
 def dedupe_words(words: list[WordSegment]) -> list[WordSegment]:
     """Deduplicate word object references while preserving order.
 

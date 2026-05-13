@@ -6,7 +6,59 @@ from typing import Any
 
 from .errors import AWSTranscriptSchemaError
 
+# BDW: This is an interesting case where pydantic may be really helpful -- if you
+# model the aws transcript response (or at least the parts you care about) as a 
+# pydantic model then it can validate and massage the data.  Alternately, 
+# something like the aws_resource_validator library might be helpful.
 
+# BDW: the need for the model becomes especially important later when you're
+# doing the conversion.  The classes below normalize and validate everything so
+# you don't have to.
+
+from pydantic import BaseModel, Field
+class AWSAlternative(BaseModel):
+    confidence: float
+    content: str
+
+class AWSPunctuation(BaseModel):
+    id: int
+    alternatives: list[AWSAlternative]
+    type: str
+
+class AWSPronunciation(BaseModel):
+    id: int
+    start_time: float
+    end_time: float
+    alternatives: list[AWSAlternative]
+    type: str
+
+class AWSAudioSegments(BaseModel):
+    id: int
+    transcript: str
+    start_time: float
+    end_time: float
+    items: list[int]
+
+class AWSTranscribeResults(BaseModel):
+    transcripts: list[dict[str, str]]
+    items: list[AWSPunctuation | AWSPronunciation] = Field(discriminator="type")
+    audio_segments: list[AWSAudioSegments]
+
+class AWSTranscribeResult(BaseModel):
+    jobName: str
+    accountId: str
+    results: AWSTranscribeResults
+    status: str
+
+# BDW: then validate becomes something like this, although you'd probably
+# just inline it
+def bdw_validate_aws_transcript(aws_transcript: dict) -> AWSTranscribeResult:
+    # if it fails it throws, otherwise we get our transcript back
+    return AWSTranscribeResult(**aws_transcript)
+
+
+# BDW: require_mapping doesn't really do anything, so it seems like there's
+# missing code or soemthign.  Maybe in a different branch?
 def validate_aws_transcript_contract(aws_transcript: object) -> None:
     """Validate only the AWS transcript fields consumed by AMPAV conversion.
 
