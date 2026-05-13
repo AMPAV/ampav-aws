@@ -9,39 +9,25 @@ import re
 import time
 from typing import Any
 
-import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from ampav.core.schema import ParagraphSegment, ToolOutput, Transcript, WordSegment
 from ampav.core.logging import LOG_FORMAT
+from ampav.core.schema import ToolOutput, Transcript
 from ampav.core.utils import pretty_yaml
 
-
-class StrictBaseModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-
-class AWSSettings(StrictBaseModel):
-    region: str | None = None
-    profile_name: str | None = None
-    access_key_id: str | None = Field(default=None, alias="aws_access_key_id")
-    secret_access_key: str | None = Field(default=None, alias="aws_secret_access_key")
-    session_token: str | None = Field(default=None, alias="aws_session_token")
-
-    @model_validator(mode="after")
-    def validate_credentials(self) -> AWSSettings:
-        explicit_keys = self.access_key_id or self.secret_access_key or self.session_token
-        if self.profile_name and explicit_keys:
-            raise ValueError("Use either profile_name or explicit AWS credentials, not both")
-        if bool(self.access_key_id) != bool(self.secret_access_key):
-            raise ValueError("access_key_id and secret_access_key must be configured together")
-        return self
-
-
-class S3Settings(StrictBaseModel):
-    bucket: str
-    input_prefix: str = "aws_transcribe/input"
-    output_prefix: str = "aws_transcribe/output"
+from .artifacts import create_artifact_writer, read_json as read_file_json, write_json
+from .config import (
+    AWSSettings,
+    PathSettings,
+    S3Settings,
+    StrictBaseModel,
+    load_yaml_mapping,
+    redact_aws_credentials,
+    resolve_path_from_config,
+)
+from .s3 import S3Location, download_file, join_s3_key, read_json as read_s3_json, upload_file
+from .session import create_boto3_session
+from .transcribe_conversion import aws_transcript_to_transcript
 
 
 class PollingSettings(StrictBaseModel):
@@ -65,10 +51,6 @@ class TranscriptionSettings(StrictBaseModel):
         return self
 
 
-class PathSettings(StrictBaseModel):
-    runs_dir: Path = Path("../runs")
-
-
 class AWSTranscribeConfig(StrictBaseModel):
     aws: AWSSettings = Field(default_factory=AWSSettings)
     s3: S3Settings
@@ -83,10 +65,10 @@ class TranscribeRunResult(BaseModel):
     input_uri: str
     output_bucket: str
     output_key: str
-    run_dir: Path
+    run_dir: Path | None = None
     transcript_json: Path | None = None
-    status_history_json: Path
-    log_file: Path
+    status_history_json: Path | None = None
+    log_file: Path | None = None
 
 
 class AWSTranscribeService:
@@ -96,10 +78,10 @@ class AWSTranscribeService:
         self.transcribe_client = session.client("transcribe")
         self.s3_client = session.client("s3")
 
-    def upload_input(self, audiofile: Path, s3_key: str) -> str:
-        logging.info("Uploading %s to s3://%s/%s", audiofile, self.config.s3.bucket, s3_key)
-        self.s3_client.upload_file(str(audiofile), self.config.s3.bucket, s3_key)
-        return f"s3://{self.config.s3.bucket}/{s3_key}"
+    def upload_input(self, audiofile: Path, destination: S3Location) -> str:
+        logging.info("Uploading %s to %s", audiofile, destination.uri)
+        upload_file(self.s3_client, audiofile, destination)
+        return destination.uri
 
     def start_job(self, request: dict[str, Any]) -> dict[str, Any]:
         logging.info("Starting AWS Transcribe job %s", request["TranscriptionJobName"])
@@ -108,103 +90,109 @@ class AWSTranscribeService:
     def get_job(self, job_name: str) -> dict[str, Any]:
         return self.transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
 
-    def download_transcript(self, output_key: str, destination: Path) -> None:
-        logging.info(
-            "Downloading raw AWS transcript from s3://%s/%s to %s",
-            self.config.s3.bucket,
-            output_key,
-            destination,
-        )
-        self.s3_client.download_file(self.config.s3.bucket, output_key, str(destination))
+    def download_transcript(self, source: S3Location, destination: Path) -> None:
+        logging.info("Downloading raw AWS transcript from %s to %s", source.uri, destination)
+        download_file(self.s3_client, source, destination)
+
+    def read_transcript(self, source: S3Location) -> Any:
+        logging.info("Reading raw AWS transcript from %s", source.uri)
+        return read_s3_json(self.s3_client, source)
 
 
 def load_config(config_path: Path) -> AWSTranscribeConfig:
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    if raw is None:
-        raw = {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {config_path}")
-    config = AWSTranscribeConfig.model_validate(raw)
-    if not config.paths.runs_dir.is_absolute():
-        config.paths.runs_dir = (config_path.parent / config.paths.runs_dir).resolve()
+    config_path = config_path.expanduser().resolve()
+    config = AWSTranscribeConfig.model_validate(load_yaml_mapping(config_path))
+    config.paths.runs_dir = resolve_path_from_config(config_path, config.paths.runs_dir)
     return config
 
 
-def create_boto3_session(settings: AWSSettings) -> Any:
-    try:
-        import boto3
-    except ImportError as exc:
-        raise RuntimeError("boto3 is required to run AWS Transcribe jobs") from exc
-
-    kwargs: dict[str, Any] = {}
-    if settings.region:
-        kwargs["region_name"] = settings.region
-    if settings.profile_name:
-        kwargs["profile_name"] = settings.profile_name
-    elif settings.access_key_id and settings.secret_access_key:
-        kwargs["aws_access_key_id"] = settings.access_key_id
-        kwargs["aws_secret_access_key"] = settings.secret_access_key
-        if settings.session_token:
-            kwargs["aws_session_token"] = settings.session_token
-    return boto3.Session(**kwargs)
-
-
 def transcribe_file(audiofile: Path, config_path: Path, debug: bool = False) -> ToolOutput:
-    audiofile = audiofile.expanduser().resolve()
     config_path = config_path.expanduser().resolve()
+    return transcribe_file_with_config(
+        audiofile=audiofile,
+        config=load_config(config_path),
+        config_path=config_path,
+        debug=debug,
+    )
+
+
+def transcribe_file_with_config(
+    audiofile: Path,
+    config: AWSTranscribeConfig,
+    config_path: Path | None = None,
+    debug: bool = False,
+) -> ToolOutput:
+    audiofile = audiofile.expanduser().resolve()
     if not audiofile.exists():
         raise FileNotFoundError(f"Input audio file does not exist: {audiofile}")
 
-    config = load_config(config_path)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     job_name = build_job_name(audiofile, config.transcription.job_name_prefix, timestamp)
-    run_dir = create_run_directory(config.paths.runs_dir, timestamp, job_name)
-    log_file = run_dir / "aws_transcribe.log"
+    artifacts = create_artifact_writer(config.paths.runs_dir, timestamp, job_name)
+    log_file = artifacts.path("aws_transcribe.log")
     configure_logging(log_file, debug=debug)
+
+    output = ToolOutput(
+        tool_name="aws_transcribe",
+        parameters=initial_tool_parameters(audiofile, config_path, config),
+    )
+    output.setup_logging()
 
     logging.info("Starting AWS Transcribe run")
     logging.info("Input audio: %s", audiofile)
-    logging.info("Run directory: %s", run_dir)
+    if artifacts.run_dir is not None:
+        logging.info("Run directory: %s", artifacts.run_dir)
+    else:
+        logging.info("Run artifact persistence is disabled")
 
     service = AWSTranscribeService(config)
-    input_key = join_s3_key(config.s3.input_prefix, f"{job_name}{audiofile.suffix}")
-    output_key = join_s3_key(config.s3.output_prefix, f"{job_name}.json")
-    transcript_json = run_dir / "aws_transcript.json"
-    status_history_json = run_dir / "status_history.json"
+    input_location = S3Location(
+        bucket=config.s3.bucket,
+        key=join_s3_key(config.s3.input_prefix, f"{job_name}{audiofile.suffix}"),
+    )
+    output_location = S3Location(
+        bucket=config.s3.bucket,
+        key=join_s3_key(config.s3.output_prefix, f"{job_name}.json"),
+    )
+    transcript_json_path = artifacts.path("aws_transcript.json")
+    status_history_path = artifacts.path("status_history.json")
 
-    input_uri = service.upload_input(audiofile, input_key)
-    request = build_start_job_request(config, job_name, input_uri, output_key, audiofile)
-    write_json(run_dir / "request.json", request)
-    write_json(run_dir / "config.redacted.json", redacted_config(config))
+    input_uri = service.upload_input(audiofile, input_location)
+    request = build_start_job_request(config, job_name, input_uri, output_location.key, audiofile)
+    artifacts.write_json("request.json", request)
+    artifacts.write_json("config.redacted.json", redacted_config(config))
+    logging.debug("AWS Transcribe request: %s", json_for_log(request))
 
-    queue_time = time.time()
+    output.queue_time = time.time()
     start_response = service.start_job(request)
-    write_json(run_dir / "start_response.json", start_response)
+    artifacts.write_json("start_response.json", start_response)
+    logging.debug("AWS Transcribe start response: %s", json_for_log(start_response))
 
     final_job, status_history = poll_until_complete(
         service=service,
         job_name=job_name,
         polling=config.polling,
-        status_history_path=status_history_json,
+        status_history_path=status_history_path,
     )
-    write_json(run_dir / "transcription_job.json", final_job)
+    artifacts.write_json("transcription_job.json", final_job)
+    logging.debug("AWS Transcribe final job: %s", json_for_log(final_job))
+    logging.debug("AWS Transcribe status history: %s", json_for_log(status_history))
 
-    service.download_transcript(output_key, transcript_json)
+    aws_transcript = read_aws_transcript(service, output_location, transcript_json_path)
     logging.info("AWS Transcribe job completed")
     result = TranscribeRunResult(
         job_name=job_name,
         status=final_job["TranscriptionJob"]["TranscriptionJobStatus"],
         input_uri=input_uri,
-        output_bucket=config.s3.bucket,
-        output_key=output_key,
-        run_dir=run_dir,
-        transcript_json=transcript_json,
-        status_history_json=status_history_json,
+        output_bucket=output_location.bucket,
+        output_key=output_location.key,
+        run_dir=artifacts.run_dir,
+        transcript_json=transcript_json_path,
+        status_history_json=status_history_path,
         log_file=log_file,
     )
-    write_json(run_dir / "run_result.json", result.model_dump(mode="json"))
+    artifacts.write_json("run_result.json", result.model_dump(mode="json"))
 
-    aws_transcript = read_json(transcript_json)
     transcript = aws_transcript_to_transcript(aws_transcript)
     logging.info("Saved %d polling status snapshots", len(status_history))
     logging.info(
@@ -212,334 +200,69 @@ def transcribe_file(audiofile: Path, config_path: Path, debug: bool = False) -> 
         len(transcript.paragraphs),
         len(transcript.words),
     )
-    return build_tool_output(
+    return finalize_tool_output(
+        output=output,
         transcript=transcript,
-        config=config,
-        audiofile=audiofile,
-        config_path=config_path,
         run_result=result,
         final_job=final_job,
-        queue_time=queue_time,
     )
 
 
-def aws_transcript_to_transcript(
-    aws_transcript: dict[str, Any],
-    media_duration: float | None = None,
-) -> Transcript:
-    results = aws_transcript.get("results")
-    if not isinstance(results, dict):
-        raise ValueError("AWS transcript JSON must contain a results object")
-
-    words, words_by_item_id = aws_items_to_words(results.get("items", []))
-    transcript = Transcript(
-        text=aws_transcript_text(results, words),
-        media_duration=media_duration if media_duration is not None else infer_transcript_duration(results, words),
-        words=words,
-    )
-    transcript.paragraphs = aws_results_to_paragraphs(results, words, words_by_item_id)
-    return transcript
+def read_aws_transcript(
+    service: AWSTranscribeService,
+    source: S3Location,
+    transcript_json_path: Path | None,
+) -> dict[str, Any]:
+    if transcript_json_path is None:
+        aws_transcript = service.read_transcript(source)
+    else:
+        service.download_transcript(source, transcript_json_path)
+        aws_transcript = read_file_json(transcript_json_path)
+    if not isinstance(aws_transcript, dict):
+        raise ValueError("AWS transcript JSON must contain an object")
+    return aws_transcript
 
 
-def aws_transcript_text(results: dict[str, Any], words: list[WordSegment]) -> str:
-    transcripts = results.get("transcripts")
-    if isinstance(transcripts, list) and transcripts:
-        first = transcripts[0]
-        if isinstance(first, dict) and isinstance(first.get("transcript"), str):
-            return first["transcript"]
-    return words_to_text(words)
-
-
-def aws_items_to_words(items: object) -> tuple[list[WordSegment], dict[int, WordSegment]]:
-    if not isinstance(items, list):
-        raise ValueError("AWS transcript results.items must be a list when present")
-
-    words: list[WordSegment] = []
-    words_by_item_id: dict[int, WordSegment] = {}
-    previous_word: WordSegment | None = None
-
-    for item in items:
-        if not isinstance(item, dict):
-            raise ValueError("AWS transcript item entries must be objects")
-
-        item_type = item.get("type")
-        if item_type == "pronunciation":
-            word = aws_pronunciation_item_to_word(item)
-            words.append(word)
-            previous_word = word
-            item_id = item.get("id")
-            if isinstance(item_id, int):
-                words_by_item_id[item_id] = word
-        elif item_type == "punctuation":
-            if previous_word is not None:
-                attach_punctuation(previous_word, item)
-        else:
-            logging.warning("Skipping unsupported AWS transcript item type: %s", item_type)
-
-    return words, words_by_item_id
-
-
-def aws_pronunciation_item_to_word(item: dict[str, Any]) -> WordSegment:
-    alternative = first_alternative(item)
-    content = alternative.get("content")
-    if not isinstance(content, str) or not content:
-        raise ValueError("AWS pronunciation item is missing alternative content")
-
-    confidence = optional_float(alternative.get("confidence"))
-    return WordSegment(
-        word=content,
-        start_time=optional_float(item.get("start_time")),
-        end_time=optional_float(item.get("end_time")),
-        speaker=item.get("speaker_label") if isinstance(item.get("speaker_label"), str) else None,
-        tool_specific={
-            "aws_item_id": item.get("id"),
-            "aws_type": item.get("type"),
-            "confidence": confidence,
-            "alternatives": item.get("alternatives", []),
-        },
-    )
-
-
-def attach_punctuation(word: WordSegment, item: dict[str, Any]) -> None:
-    alternative = first_alternative(item)
-    content = alternative.get("content")
-    if not isinstance(content, str) or not content:
-        raise ValueError("AWS punctuation item is missing alternative content")
-
-    word.suffix = f"{word.suffix or ''}{content}"
-    if word.tool_specific is None:
-        word.tool_specific = {}
-    word.tool_specific.setdefault("aws_punctuation", []).append(
-        {
-            "aws_item_id": item.get("id"),
-            "content": content,
-            "confidence": optional_float(alternative.get("confidence")),
-            "alternatives": item.get("alternatives", []),
-        }
-    )
-
-
-def first_alternative(item: dict[str, Any]) -> dict[str, Any]:
-    alternatives = item.get("alternatives")
-    if not isinstance(alternatives, list) or not alternatives or not isinstance(alternatives[0], dict):
-        raise ValueError("AWS transcript item is missing alternatives")
-    return alternatives[0]
-
-
-def aws_results_to_paragraphs(
-    results: dict[str, Any],
-    words: list[WordSegment],
-    words_by_item_id: dict[int, WordSegment],
-) -> list[ParagraphSegment]:
-    audio_segments = results.get("audio_segments")
-    if isinstance(audio_segments, list) and audio_segments:
-        return aws_audio_segments_to_paragraphs(audio_segments)
-
-    speaker_labels = results.get("speaker_labels")
-    if isinstance(speaker_labels, dict):
-        speaker_segments = speaker_labels.get("segments")
-        if isinstance(speaker_segments, list) and speaker_segments:
-            return aws_speaker_segments_to_paragraphs(speaker_segments, words, words_by_item_id)
-
-    if not words:
-        return []
-    transcript = Transcript(words=words)
-    transcript.reformat_paragraphs()
-    return transcript.paragraphs
-
-
-def aws_audio_segments_to_paragraphs(audio_segments: list[object]) -> list[ParagraphSegment]:
-    paragraphs: list[ParagraphSegment] = []
-    for segment in audio_segments:
-        if not isinstance(segment, dict):
-            raise ValueError("AWS transcript audio_segments entries must be objects")
-        paragraphs.append(
-            ParagraphSegment(
-                start_time=optional_float(segment.get("start_time")),
-                end_time=optional_float(segment.get("end_time")),
-                speaker=segment.get("speaker_label") if isinstance(segment.get("speaker_label"), str) else None,
-                text=segment.get("transcript") if isinstance(segment.get("transcript"), str) else "",
-                tool_specific={
-                    "aws_segment_type": "audio_segment",
-                    "aws_segment_id": segment.get("id"),
-                    "aws_item_ids": segment.get("items", []),
-                },
-            )
-        )
-    return paragraphs
-
-
-def aws_speaker_segments_to_paragraphs(
-    speaker_segments: list[object],
-    words: list[WordSegment],
-    words_by_item_id: dict[int, WordSegment],
-) -> list[ParagraphSegment]:
-    paragraphs: list[ParagraphSegment] = []
-    for segment in speaker_segments:
-        if not isinstance(segment, dict):
-            raise ValueError("AWS transcript speaker label segments must be objects")
-
-        segment_words = speaker_segment_words(segment, words, words_by_item_id)
-        segment_start_time = optional_float(segment.get("start_time"))
-        segment_end_time = optional_float(segment.get("end_time"))
-        if segment_words:
-            text = words_to_text(segment_words)
-            start_time = segment_start_time if segment_start_time is not None else segment_words[0].start_time
-            end_time = segment_end_time if segment_end_time is not None else segment_words[-1].end_time
-        else:
-            text = ""
-            start_time = segment_start_time
-            end_time = segment_end_time
-
-        paragraphs.append(
-            ParagraphSegment(
-                start_time=start_time,
-                end_time=end_time,
-                speaker=segment.get("speaker_label") if isinstance(segment.get("speaker_label"), str) else None,
-                text=text,
-                tool_specific={
-                    "aws_segment_type": "speaker_label",
-                    "aws_items": segment.get("items", []),
-                },
-            )
-        )
-    return paragraphs
-
-
-def speaker_segment_words(
-    segment: dict[str, Any],
-    words: list[WordSegment],
-    words_by_item_id: dict[int, WordSegment],
-) -> list[WordSegment]:
-    items = segment.get("items")
-    if isinstance(items, list):
-        matched_by_time: list[WordSegment] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            item_word = match_word_by_time(
-                words=words,
-                start_time=optional_float(item.get("start_time")),
-                end_time=optional_float(item.get("end_time")),
-                speaker=item.get("speaker_label") if isinstance(item.get("speaker_label"), str) else None,
-            )
-            if item_word is not None:
-                matched_by_time.append(item_word)
-        if matched_by_time:
-            return dedupe_words(matched_by_time)
-
-    segment_item_ids = segment.get("items")
-    if isinstance(segment_item_ids, list):
-        matched_by_id = [
-            words_by_item_id[item_id]
-            for item_id in segment_item_ids
-            if isinstance(item_id, int) and item_id in words_by_item_id
-        ]
-        if matched_by_id:
-            return dedupe_words(matched_by_id)
-
-    start_time = optional_float(segment.get("start_time"))
-    end_time = optional_float(segment.get("end_time"))
-    speaker = segment.get("speaker_label") if isinstance(segment.get("speaker_label"), str) else None
-    return [
-        word
-        for word in words
-        if word_in_time_range(word, start_time, end_time) and (speaker is None or word.speaker == speaker)
-    ]
-
-
-def match_word_by_time(
-    words: list[WordSegment],
-    start_time: float | None,
-    end_time: float | None,
-    speaker: str | None,
-) -> WordSegment | None:
-    for word in words:
-        if word.start_time == start_time and word.end_time == end_time and (speaker is None or word.speaker == speaker):
-            return word
-    return None
-
-
-def word_in_time_range(word: WordSegment, start_time: float | None, end_time: float | None) -> bool:
-    if start_time is None or end_time is None or word.start_time is None or word.end_time is None:
-        return False
-    return start_time <= word.start_time and word.end_time <= end_time
-
-
-def dedupe_words(words: list[WordSegment]) -> list[WordSegment]:
-    seen: set[int] = set()
-    result: list[WordSegment] = []
-    for word in words:
-        identity = id(word)
-        if identity not in seen:
-            seen.add(identity)
-            result.append(word)
-    return result
-
-
-def words_to_text(words: list[WordSegment]) -> str:
-    return " ".join(word.to_str() for word in words)
-
-
-def infer_transcript_duration(results: dict[str, Any], words: list[WordSegment]) -> float | None:
-    candidates: list[float] = []
-    audio_segments = results.get("audio_segments")
-    if isinstance(audio_segments, list):
-        candidates.extend(
-            time_value
-            for segment in audio_segments
-            if isinstance(segment, dict)
-            for time_value in [optional_float(segment.get("end_time"))]
-            if time_value is not None
-        )
-    candidates.extend(word.end_time for word in words if word.end_time is not None)
-    return max(candidates) if candidates else None
-
-
-def optional_float(value: object) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Expected a numeric AWS transcript value, got {value!r}") from exc
-
-
-def build_tool_output(
-    transcript: Transcript,
-    config: AWSTranscribeConfig,
+def initial_tool_parameters(
     audiofile: Path,
-    config_path: Path,
-    run_result: TranscribeRunResult,
-    final_job: dict[str, Any],
-    queue_time: float,
-) -> ToolOutput:
-    job_data = final_job.get("TranscriptionJob", {})
+    config_path: Path | None,
+    config: AWSTranscribeConfig,
+) -> dict[str, Any]:
     parameters = {
         "content_source": str(audiofile),
-        "config": str(config_path),
-        "job_name": run_result.job_name,
-        "status": run_result.status,
+        "config": str(config_path) if config_path is not None else None,
         "aws_region": config.aws.region,
         "language_code": config.transcription.language_code,
         "identify_language": config.transcription.identify_language,
         "language_options": config.transcription.language_options,
+    }
+    return {key: value for key, value in parameters.items() if value is not None}
+
+
+def finalize_tool_output(
+    output: ToolOutput,
+    transcript: Transcript,
+    run_result: TranscribeRunResult,
+    final_job: dict[str, Any],
+) -> ToolOutput:
+    job_data = final_job.get("TranscriptionJob", {})
+    parameters = {
+        **output.parameters,
+        "status": run_result.status,
+        "job_name": run_result.job_name,
         "s3_input_uri": run_result.input_uri,
         "s3_output_bucket": run_result.output_bucket,
         "s3_output_key": run_result.output_key,
-        "run_dir": str(run_result.run_dir),
+        "run_dir": str(run_result.run_dir) if run_result.run_dir is not None else None,
         "raw_transcript_json": str(run_result.transcript_json) if run_result.transcript_json else None,
-        "status_history_json": str(run_result.status_history_json),
-        "log_file": str(run_result.log_file),
+        "status_history_json": str(run_result.status_history_json) if run_result.status_history_json else None,
+        "log_file": str(run_result.log_file) if run_result.log_file else None,
     }
-    return ToolOutput(
-        tool_name="aws_transcribe",
-        parameters={key: value for key, value in parameters.items() if value is not None},
-        queue_time=queue_time,
-        start_time=timestamp_or_none(job_data.get("StartTime")) or timestamp_or_none(job_data.get("CreationTime")),
-        end_time=timestamp_or_none(job_data.get("CompletionTime")) or time.time(),
-        output=transcript,
-    )
+    output.parameters = {key: value for key, value in parameters.items() if value is not None}
+    output.start_time = timestamp_or_none(job_data.get("StartTime")) or timestamp_or_none(job_data.get("CreationTime"))
+    output.end_time = timestamp_or_none(job_data.get("CompletionTime")) or time.time()
+    output.output = transcript
+    return output
 
 
 def timestamp_or_none(value: object) -> float | None:
@@ -585,7 +308,7 @@ def poll_until_complete(
     service: AWSTranscribeService,
     job_name: str,
     polling: PollingSettings,
-    status_history_path: Path,
+    status_history_path: Path | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     started = time.monotonic()
     history: list[dict[str, Any]] = []
@@ -601,7 +324,8 @@ def poll_until_complete(
             "transcript_file_uri": job_data.get("Transcript", {}).get("TranscriptFileUri"),
         }
         history.append(snapshot)
-        write_json(status_history_path, history)
+        if status_history_path is not None:
+            write_json(status_history_path, history)
         logging.info("AWS Transcribe job %s status: %s", job_name, status)
 
         if status == "COMPLETED":
@@ -615,7 +339,7 @@ def poll_until_complete(
         time.sleep(polling.interval_seconds)
 
 
-def configure_logging(log_file: Path, debug: bool = False) -> None:
+def configure_logging(log_file: Path | None, debug: bool = False) -> None:
     level = logging.DEBUG if debug else logging.INFO
     formatter = logging.Formatter(LOG_FORMAT)
     root_logger = logging.getLogger()
@@ -629,22 +353,11 @@ def configure_logging(log_file: Path, debug: bool = False) -> None:
     stream_handler.setLevel(level)
     root_logger.addHandler(stream_handler)
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(level)
-    root_logger.addHandler(file_handler)
-
-
-def create_run_directory(runs_dir: Path, timestamp: str, job_name: str) -> Path:
-    runs_dir = runs_dir.expanduser()
-    run_name = safe_path_part(f"{timestamp}_{job_name}")[:240]
-    candidate = runs_dir / run_name
-    suffix = 1
-    while candidate.exists():
-        candidate = runs_dir / f"{run_name}_{suffix}"
-        suffix += 1
-    candidate.mkdir(parents=True)
-    return candidate
+    if log_file is not None:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(level)
+        root_logger.addHandler(file_handler)
 
 
 def build_job_name(audiofile: Path, prefix: str, timestamp: str) -> str:
@@ -658,15 +371,6 @@ def safe_job_part(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
 
 
-def safe_path_part(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
-
-
-def join_s3_key(prefix: str, filename: str) -> str:
-    clean_prefix = prefix.strip("/")
-    return f"{clean_prefix}/{filename}" if clean_prefix else filename
-
-
 def infer_media_format(audiofile: Path) -> str:
     media_format = audiofile.suffix.lower().lstrip(".")
     if not media_format:
@@ -675,20 +379,11 @@ def infer_media_format(audiofile: Path) -> str:
 
 
 def redacted_config(config: AWSTranscribeConfig) -> dict[str, Any]:
-    data = config.model_dump(mode="json")
-    aws_data = data.get("aws", {})
-    for key in ("access_key_id", "secret_access_key", "session_token"):
-        if aws_data.get(key):
-            aws_data[key] = "***"
-    return data
+    return redact_aws_credentials(config.model_dump(mode="json"))
 
 
-def write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
-
-
-def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+def json_for_log(data: Any) -> str:
+    return json.dumps(data, default=str, sort_keys=True)
 
 
 def cli_aws_transcribe() -> None:
