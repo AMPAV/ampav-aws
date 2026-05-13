@@ -85,7 +85,7 @@ PATH_TO_LOCAL_RUNTIME_WORKSPACE/
 Routine tests are offline and deterministic:
 
 ```bash
-/home/yingfeng/AMPAV/.venv/bin/python -m unittest discover -s tests
+AMPAV/.venv/bin/python -m unittest discover -s tests
 ```
 
 An optional live AWS smoke test uses `tests/fixtures/OpenDoor.wav` and is skipped by
