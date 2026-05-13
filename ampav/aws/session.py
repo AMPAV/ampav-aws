@@ -1,3 +1,5 @@
+"""boto3 session creation helpers for AMPAV AWS tools."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -6,6 +8,14 @@ from .config import AWSSettings
 
 
 def create_boto3_session(settings: AWSSettings) -> Any:
+    """Create a boto3 session from explicit, profile, or default-chain settings.
+
+    :param settings: AWS region and credential settings.
+    :type settings: AWSSettings
+    :return: Configured ``boto3.Session`` instance.
+    :rtype: Any
+    :raises RuntimeError: If boto3 is not installed.
+    """
     try:
         import boto3
     except ImportError as exc:

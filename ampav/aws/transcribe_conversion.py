@@ -1,3 +1,5 @@
+"""Convert AWS Transcribe transcript JSON into AMPAV transcript schema."""
+
 from __future__ import annotations
 
 import logging
@@ -5,26 +7,56 @@ from typing import Any
 
 from ampav.core.schema import ParagraphSegment, Transcript, WordSegment
 
+from .errors import AWSTranscriptSchemaError
+from .transcribe_contract import validate_aws_transcript_contract
+
 
 def aws_transcript_to_transcript(
     aws_transcript: dict[str, Any],
     media_duration: float | None = None,
 ) -> Transcript:
-    results = aws_transcript.get("results")
-    if not isinstance(results, dict):
-        raise ValueError("AWS transcript JSON must contain a results object")
+    """Convert AWS Transcribe JSON into the AMPAV transcript schema.
 
-    words, words_by_item_id = aws_items_to_words(results.get("items", []))
-    transcript = Transcript(
-        text=aws_transcript_text(results, words),
-        media_duration=media_duration if media_duration is not None else infer_transcript_duration(results, words),
-        words=words,
-    )
-    transcript.paragraphs = aws_results_to_paragraphs(results, words, words_by_item_id)
-    return transcript
+    The AWS contract validator runs first so AWS output drift reports the
+    missing or incompatible JSON path before conversion begins.
+
+    :param aws_transcript: Raw AWS Transcribe transcript JSON object.
+    :type aws_transcript: dict[str, Any]
+    :param media_duration: Optional media duration override. When ``None``,
+        duration is inferred from AWS segments or word end times.
+    :type media_duration: float | None
+    :return: Normalized AMPAV Transcript.
+    :rtype: Transcript
+    :raises AWSTranscriptSchemaError: If the AWS transcript contract is invalid
+        or conversion fails.
+    """
+    validate_aws_transcript_contract(aws_transcript)
+    try:
+        results = aws_transcript["results"]
+        words, words_by_item_id = aws_items_to_words(results.get("items", []))
+        transcript = Transcript(
+            text=aws_transcript_text(results, words),
+            media_duration=media_duration if media_duration is not None else infer_transcript_duration(results, words),
+            words=words,
+        )
+        transcript.paragraphs = aws_results_to_paragraphs(results, words, words_by_item_id)
+        return transcript
+    except AWSTranscriptSchemaError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AWSTranscriptSchemaError("$", f"failed to convert AWS transcript: {exc}") from exc
 
 
 def aws_transcript_text(results: dict[str, Any], words: list[WordSegment]) -> str:
+    """Return transcript text from AWS transcripts or reconstruct it from words.
+
+    :param results: AWS ``results`` object.
+    :type results: dict[str, Any]
+    :param words: Converted word segments used as a fallback text source.
+    :type words: list[WordSegment]
+    :return: Transcript text.
+    :rtype: str
+    """
     transcripts = results.get("transcripts")
     if isinstance(transcripts, list) and transcripts:
         first = transcripts[0]
@@ -34,6 +66,14 @@ def aws_transcript_text(results: dict[str, Any], words: list[WordSegment]) -> st
 
 
 def aws_items_to_words(items: object) -> tuple[list[WordSegment], dict[int, WordSegment]]:
+    """Convert AWS item entries into AMPAV word segments and an item-id map.
+
+    :param items: AWS ``results.items`` value.
+    :type items: object
+    :return: Word segments and a map from AWS integer item id to word segment.
+    :rtype: tuple[list[WordSegment], dict[int, WordSegment]]
+    :raises ValueError: If ``items`` is not a list or contains invalid entries.
+    """
     if not isinstance(items, list):
         raise ValueError("AWS transcript results.items must be a list when present")
 
@@ -63,6 +103,14 @@ def aws_items_to_words(items: object) -> tuple[list[WordSegment], dict[int, Word
 
 
 def aws_pronunciation_item_to_word(item: dict[str, Any]) -> WordSegment:
+    """Convert a single AWS pronunciation item into a WordSegment.
+
+    :param item: AWS pronunciation item object.
+    :type item: dict[str, Any]
+    :return: Converted AMPAV word segment.
+    :rtype: WordSegment
+    :raises ValueError: If the item is missing required alternative content.
+    """
     alternative = first_alternative(item)
     content = alternative.get("content")
     if not isinstance(content, str) or not content:
@@ -84,6 +132,14 @@ def aws_pronunciation_item_to_word(item: dict[str, Any]) -> WordSegment:
 
 
 def attach_punctuation(word: WordSegment, item: dict[str, Any]) -> None:
+    """Attach an AWS punctuation item to the previous WordSegment suffix.
+
+    :param word: Word segment that receives the punctuation suffix.
+    :type word: WordSegment
+    :param item: AWS punctuation item object.
+    :type item: dict[str, Any]
+    :raises ValueError: If the item is missing required punctuation content.
+    """
     alternative = first_alternative(item)
     content = alternative.get("content")
     if not isinstance(content, str) or not content:
@@ -103,6 +159,14 @@ def attach_punctuation(word: WordSegment, item: dict[str, Any]) -> None:
 
 
 def first_alternative(item: dict[str, Any]) -> dict[str, Any]:
+    """Return the first AWS alternative entry for a transcript item.
+
+    :param item: AWS transcript item object.
+    :type item: dict[str, Any]
+    :return: First alternative entry.
+    :rtype: dict[str, Any]
+    :raises ValueError: If no usable alternative exists.
+    """
     alternatives = item.get("alternatives")
     if not isinstance(alternatives, list) or not alternatives or not isinstance(alternatives[0], dict):
         raise ValueError("AWS transcript item is missing alternatives")
@@ -114,6 +178,17 @@ def aws_results_to_paragraphs(
     words: list[WordSegment],
     words_by_item_id: dict[int, WordSegment],
 ) -> list[ParagraphSegment]:
+    """Build paragraphs from AWS audio segments, speaker labels, or word timing.
+
+    :param results: AWS ``results`` object.
+    :type results: dict[str, Any]
+    :param words: Converted word segments.
+    :type words: list[WordSegment]
+    :param words_by_item_id: Map from AWS integer item id to word segment.
+    :type words_by_item_id: dict[int, WordSegment]
+    :return: Paragraph segments.
+    :rtype: list[ParagraphSegment]
+    """
     audio_segments = results.get("audio_segments")
     if isinstance(audio_segments, list) and audio_segments:
         return aws_audio_segments_to_paragraphs(audio_segments)
@@ -132,6 +207,14 @@ def aws_results_to_paragraphs(
 
 
 def aws_audio_segments_to_paragraphs(audio_segments: list[object]) -> list[ParagraphSegment]:
+    """Convert AWS audio_segments entries into AMPAV paragraph segments.
+
+    :param audio_segments: AWS ``results.audio_segments`` entries.
+    :type audio_segments: list[object]
+    :return: Paragraph segments.
+    :rtype: list[ParagraphSegment]
+    :raises ValueError: If an audio segment is not an object.
+    """
     paragraphs: list[ParagraphSegment] = []
     for segment in audio_segments:
         if not isinstance(segment, dict):
@@ -157,6 +240,18 @@ def aws_speaker_segments_to_paragraphs(
     words: list[WordSegment],
     words_by_item_id: dict[int, WordSegment],
 ) -> list[ParagraphSegment]:
+    """Convert AWS speaker label segments into AMPAV paragraph segments.
+
+    :param speaker_segments: AWS ``speaker_labels.segments`` entries.
+    :type speaker_segments: list[object]
+    :param words: Converted word segments.
+    :type words: list[WordSegment]
+    :param words_by_item_id: Map from AWS integer item id to word segment.
+    :type words_by_item_id: dict[int, WordSegment]
+    :return: Paragraph segments.
+    :rtype: list[ParagraphSegment]
+    :raises ValueError: If a speaker segment is not an object.
+    """
     paragraphs: list[ParagraphSegment] = []
     for segment in speaker_segments:
         if not isinstance(segment, dict):
@@ -194,6 +289,17 @@ def speaker_segment_words(
     words: list[WordSegment],
     words_by_item_id: dict[int, WordSegment],
 ) -> list[WordSegment]:
+    """Find words that belong to an AWS speaker label segment.
+
+    :param segment: AWS speaker label segment object.
+    :type segment: dict[str, Any]
+    :param words: Converted word segments.
+    :type words: list[WordSegment]
+    :param words_by_item_id: Map from AWS integer item id to word segment.
+    :type words_by_item_id: dict[int, WordSegment]
+    :return: Words matched to the speaker segment.
+    :rtype: list[WordSegment]
+    """
     items = segment.get("items")
     if isinstance(items, list):
         matched_by_time: list[WordSegment] = []
@@ -237,6 +343,19 @@ def match_word_by_time(
     end_time: float | None,
     speaker: str | None,
 ) -> WordSegment | None:
+    """Return the first word matching a speaker segment item time range.
+
+    :param words: Candidate word segments.
+    :type words: list[WordSegment]
+    :param start_time: Required start time, or ``None``.
+    :type start_time: float | None
+    :param end_time: Required end time, or ``None``.
+    :type end_time: float | None
+    :param speaker: Required speaker label, or ``None`` to ignore speaker.
+    :type speaker: str | None
+    :return: Matching word segment or ``None``.
+    :rtype: WordSegment | None
+    """
     for word in words:
         if word.start_time == start_time and word.end_time == end_time and (speaker is None or word.speaker == speaker):
             return word
@@ -244,12 +363,30 @@ def match_word_by_time(
 
 
 def word_in_time_range(word: WordSegment, start_time: float | None, end_time: float | None) -> bool:
+    """Return whether a word is wholly contained in a time range.
+
+    :param word: Word segment to test.
+    :type word: WordSegment
+    :param start_time: Inclusive start of the time range.
+    :type start_time: float | None
+    :param end_time: Inclusive end of the time range.
+    :type end_time: float | None
+    :return: ``True`` if the word is fully inside the range.
+    :rtype: bool
+    """
     if start_time is None or end_time is None or word.start_time is None or word.end_time is None:
         return False
     return start_time <= word.start_time and word.end_time <= end_time
 
 
 def dedupe_words(words: list[WordSegment]) -> list[WordSegment]:
+    """Deduplicate word object references while preserving order.
+
+    :param words: Word segments that may contain duplicate object references.
+    :type words: list[WordSegment]
+    :return: Deduplicated word segments in original order.
+    :rtype: list[WordSegment]
+    """
     seen: set[int] = set()
     result: list[WordSegment] = []
     for word in words:
@@ -261,10 +398,26 @@ def dedupe_words(words: list[WordSegment]) -> list[WordSegment]:
 
 
 def words_to_text(words: list[WordSegment]) -> str:
+    """Render AMPAV word segments into plain transcript text.
+
+    :param words: Word segments to render.
+    :type words: list[WordSegment]
+    :return: Plain transcript text.
+    :rtype: str
+    """
     return " ".join(word.to_str() for word in words)
 
 
 def infer_transcript_duration(results: dict[str, Any], words: list[WordSegment]) -> float | None:
+    """Infer media duration from AWS segment or word end times.
+
+    :param results: AWS ``results`` object.
+    :type results: dict[str, Any]
+    :param words: Converted word segments.
+    :type words: list[WordSegment]
+    :return: Maximum observed end time, or ``None`` when unavailable.
+    :rtype: float | None
+    """
     candidates: list[float] = []
     audio_segments = results.get("audio_segments")
     if isinstance(audio_segments, list):
@@ -280,6 +433,14 @@ def infer_transcript_duration(results: dict[str, Any], words: list[WordSegment])
 
 
 def optional_float(value: object) -> float | None:
+    """Convert an optional AWS numeric string into a float.
+
+    :param value: AWS numeric string, number, or ``None``.
+    :type value: object
+    :return: Converted float or ``None``.
+    :rtype: float | None
+    :raises ValueError: If ``value`` is not ``None`` and cannot be converted.
+    """
     if value is None:
         return None
     try:
