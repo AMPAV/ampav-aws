@@ -57,7 +57,10 @@ def upload_file(s3_client: Any, source: Path, destination: S3Location) -> None:
     :param destination: Destination bucket/key.
     :type destination: S3Location
     """
-    s3_client.upload_file(str(source), destination.bucket, destination.key)
+    try:
+        s3_client.upload_file(str(source), destination.bucket, destination.key)
+    except Exception as exc:
+        raise AWSArtifactError(f"Could not upload {source} to {destination.uri}: {exc}") from exc
 
 
 def download_file(s3_client: Any, source: S3Location, destination: Path) -> None:
@@ -70,7 +73,10 @@ def download_file(s3_client: Any, source: S3Location, destination: Path) -> None
     :param destination: Local file path to write.
     :type destination: Path
     """
-    s3_client.download_file(source.bucket, source.key, str(destination))
+    try:
+        s3_client.download_file(source.bucket, source.key, str(destination))
+    except Exception as exc:
+        raise AWSArtifactError(f"Could not download {source.uri} to {destination}: {exc}") from exc
 
 
 def read_json(s3_client: Any, source: S3Location) -> Any:
@@ -84,9 +90,11 @@ def read_json(s3_client: Any, source: S3Location) -> Any:
     :rtype: Any
     :raises AWSArtifactError: If the S3 object body is not valid JSON.
     """
-    response = s3_client.get_object(Bucket=source.bucket, Key=source.key)
-    with response["Body"] as body:
-        try:
+    try:
+        response = s3_client.get_object(Bucket=source.bucket, Key=source.key)
+        with response["Body"] as body:
             return json.loads(body.read().decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise AWSArtifactError(f"Could not parse JSON from {source.uri}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise AWSArtifactError(f"Could not parse JSON from {source.uri}: {exc}") from exc
+    except Exception as exc:
+        raise AWSArtifactError(f"Could not read JSON from {source.uri}: {exc}") from exc
