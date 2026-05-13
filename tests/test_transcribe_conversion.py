@@ -5,7 +5,7 @@ import json
 import unittest
 from pathlib import Path
 
-from ampav.aws.transcribe import aws_transcript_to_transcript
+from ampav.aws.transcribe_conversion import aws_transcript_to_transcript
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "aws_transcript_opendoor.json"

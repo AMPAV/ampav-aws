@@ -25,5 +25,6 @@ transcription:
   job_name_prefix: ampav-aws-transcribe
 
 paths:
-  # Relative paths are resolved from the config file's directory.
-  runs_dir: PATH_TO_LOCAL_RUNS_DIR
+  # Omit this setting or set it to null to avoid local debug artifact persistence.
+  # Relative paths are resolved from the config file's directory when configured.
+  runs_dir: null
