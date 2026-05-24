@@ -57,3 +57,17 @@ or anyone else), at this point we're just writing low level wrappers and
 convenience functions/classes.
 
 """
+
+"""
+YF: Partially agree. 
+
+For code using python < 3.10, __future__ is still needed; Since we are using 3.12, we can go without __future__.
+
+Documentation: use
+- use standard docstring for public APIs; 
+- simplied docstring for private methods; 
+- inline comment for complicated logic, trade offs, or special decisions made (reasons).
+
+About config file and artifacts, see details in corresponding files.
+
+"""

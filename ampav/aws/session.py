@@ -18,6 +18,7 @@ def create_boto3_session(settings: AWSSettings) -> Any:
     :raises RuntimeError: If boto3 is not installed.
     """
     # BDW: Import at top
+    # YF: Agree and adopt.
     try:
         import boto3
     except ImportError as exc:
@@ -41,5 +42,6 @@ def create_boto3_session(settings: AWSSettings) -> Any:
     #                     aws_access_key_id=settings.access_key_id,
     #                     aws_secret_access_key=settings.secret_access_key,
     #                     aws_session_token=settings.session_token)
+    # YF: Agree and adopt.
     
     return boto3.Session(**kwargs)

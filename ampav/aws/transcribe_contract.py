@@ -15,6 +15,8 @@ from .errors import AWSTranscriptSchemaError
 # doing the conversion.  The classes below normalize and validate everything so
 # you don't have to.
 
+# YF: Agree. We should take advantage of Pydantic v2 patterns.
+
 from pydantic import BaseModel, Field
 class AWSAlternative(BaseModel):
     confidence: float

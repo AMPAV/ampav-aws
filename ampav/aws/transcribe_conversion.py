@@ -14,6 +14,8 @@ from .transcribe_contract import validate_aws_transcript_contract
 # you get to the point you want to convert the AWS transcript to our Transcript
 # all of that should have been normalized.
 
+# YF: Agree. We can trust validated data (AWSTranscribeResult validated by Pydantic) at this stage.
+
 def aws_transcript_to_transcript(
     aws_transcript: dict[str, Any],
     media_duration: float | None = None,
@@ -71,6 +73,7 @@ def aws_transcript_text(results: dict[str, Any], words: list[WordSegment]) -> st
 # can be used to to your advantage to make this smaller and easier to understand.
 # this one function effectively replaces aws_items_to_words, 
 # aws_pronunciation_item_to_word, attach_punctuation, and first_alternative.
+# YF: Agree and adopt
 from .transcribe_contract import AWSTranscribeResult
 def bdw_aws_items_to_words(aws: AWSTranscribeResult) -> list[WordSegment]:
     res: list[WordSegment] = []

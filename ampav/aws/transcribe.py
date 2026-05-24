@@ -680,6 +680,7 @@ def json_for_log(data: Any) -> str:
 
 # BDW: All(?) of your settings should be command line arguments.  You should be
 # able to pass an S3 location and credentials too
+# YF: Partially agree, except for AWS credentials - do not enter on cmd line.
 def cli_aws_transcribe() -> None:
     """CLI entrypoint for AWS Transcribe."""
     parser = argparse.ArgumentParser()
@@ -699,6 +700,7 @@ def cli_aws_transcribe() -> None:
 
     # BDW: All of the ampav schemas have a yaml dump:
     # print(result.model_dump_yaml())
+    # YF: Agree and adopt
     print(pretty_yaml(result.model_dump(mode="json", exclude_none=True), sort_keys=False))
 
 

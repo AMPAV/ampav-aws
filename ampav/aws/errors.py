@@ -6,6 +6,13 @@ from __future__ import annotations
 # alone a hierarchy.  Unless you're doing something really special, you 
 # likely just want to use the built-in exception classes.
 
+# YF: Partially Agree. 
+# We can reduce the granularity of Error type to be per tool (AwsTranscribeError). Considering that
+# the tools are intended to be used in pipelines, it's helpful to isolate errors per tool for troubleshooing.
+# In addition, we should also keep AwsTranscriptSchemaError (subclass of AwsTranscribeError),
+# so it's easy to search in logs, as this is a specific one we want to watch over time.
+# Note: If a paritcular error type is already defined in boto3, we don't need to wrap it.
+
 class AmpavAWSError(Exception):
     """Base class for AMPAV AWS package errors."""
 
@@ -60,6 +67,7 @@ def is_aws_sdk_error(exc: BaseException) -> bool:
     # wouldn't be is if they're optional (like I do with numpy in core) for
     # the library.  Here, the library is actually loaded into python by boto3
     # so putting this at the top of the file is the right thing to do.
+    # YF: Agree and adopt.
     try:
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError:

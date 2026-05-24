@@ -17,7 +17,13 @@ from .errors import AWSArtifactError
 # The rest of the functions are just really thin wrappers on an s3_client and 
 # I'm not sure about the utility of them rather than just having the users
 # call the boto3 functions directly.
-#
+
+# YF: DISCUSS. 
+# Once we reduce the error type granualarity, we might not need this layer of abstraction?
+# Consider the following, what would be the best strategy to max code reuse:
+# 1) We will implement AWS Comprehend next;
+# 2) We will use other non-AWS S3 services in other tools in the future.
+
 @dataclass(frozen=True)
 class S3Location:
     """A bucket/key pair identifying an object in S3.

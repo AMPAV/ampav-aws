@@ -10,10 +10,19 @@ from typing import Any
 
 from .errors import AWSArtifactError
 
+# YF: DISCUSS.
+# I agree that we don't need to handle local artifacts in the library, that should live in client code.
+# 1) All job info are logged (at various level) and included in tool output messages.
+# 2) Original json outputs will be stored in tool_private.
+# 3) Some minium job info should be returned to client (in tool_private?) to be used to retrieve job details.
+# 4) We can provide APIs in this library to list/get/delete AWS jobs, so clients can manage them.
+# 5) We should also provide (in the library) option (CLI flag or client config) to delete S3 artifacts after job completes.
+# That said, the artifacts related code can be moved to examples as part of client code demo.
+
 # BDW: ArtifactWriter should just be regular class -- it's not just passing
 # structured data around as a unit.  You also have a constructor that's outside
 # the class.  A more streamlined implemenation may be:
-
+# YF: Agree and adopt.
 class BDWArtifactWriter:
     def __init__(self, run_dir: Path | None, timestamp: str = None, job_name: str = None):
         self.run_dir: Path = run_dir
@@ -68,6 +77,7 @@ class ArtifactWriter:
         #    write_json(p, data)
         #    return p
         # None is the default return value....so no need to return it explicitly        
+        # YF: Agree and adopt.
 
         path = self.path(name)
         if path is not None:
@@ -143,13 +153,16 @@ def write_json(path: Path, data: Any) -> None:
     try:
         # utf-8 is the default encoding, so no need to specify it.  No need to
         # append a newline.  
+        # YF: Agree and adopt.
         path.write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
         # alternately, it can be written like this which is more idiomatic:
         #with open(path, "w") as f:
         #    json.dump(data, f, indent=2)
+        # YF: Agree and adopt.
     except OSError as exc:
         # BDW: If it were me, I'd just let the error propigate upward as-is and
         # skip the try/except block altogether.
+        # YF: Agree and adopt.
         raise AWSArtifactError(f"Could not write artifact {path}: {exc}") from exc
 
 
@@ -164,6 +177,7 @@ def read_json(path: Path) -> Any:
     """
     # BDW: let the individual exceptions work their way up and skip the
     # try/except block entirely
+    # YF: Agree and adopt.
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:

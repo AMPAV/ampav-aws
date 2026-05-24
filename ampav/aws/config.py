@@ -4,6 +4,19 @@
 # Any library functions and CLI tools should use the defaults that boto has
 # and allow the user to override them using optional arguments.
 
+# YF: DISCUSS.
+# I agree that we don't need to support config handling in the libary, these better live in client code.
+# In a large system, putting settings in one config file is reasonable and efficient;
+# in low level libraries, we may end up with many small config files per package/tool, 
+# that is undesirable for users. Since boto3 already supports profiles 
+# (~/.aws/credentials & ~/.aws/config), which we already handle, the CLI can 
+# just use cmd args for the rest of the runtime settings.
+# That said, since we already have the code here, we might as well move them into examples 
+# (or part of integration tests? I think "examples" makes more sense).
+# In the future, when we write (REST API) services hosted on our server, or integrated pipelines,
+# we can add support for global config across the endpoints, reusing some of the code here (with modifications).
+# Note: Can we take advantage of BaseSettings to handle user config file?
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -71,6 +84,7 @@ class S3Settings(StrictBaseModel):
 
 # BDW: this is a data class with a singular value.  It should be inlined
 # when actually used
+# YF: Agree and adopt.
 class PathSettings(StrictBaseModel):
     """Optional local paths used by AWS tools for debug artifacts.
 
@@ -93,6 +107,8 @@ def load_yaml_mapping(config_path: Path) -> dict[str, Any]:
     # BDW: Let the exceptions propagate upward -- they'll be more descriptive if
     # you don't catch them anyway (i.e. the yaml errors have a lot of good info
     # where the file is broken)
+    # YF: Mostly agree. If the lower level error type is removed, we can catch/rethrow
+    # at a higher level where context info is still available.
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -111,7 +127,7 @@ def load_yaml_mapping(config_path: Path) -> dict[str, Any]:
 #    data = yaml.safe_load(f)
 # if not isinstance(data, dict):
 #    # some error
-
+# YF: Agree and adopt.
 
 
 def resolve_path_from_config(config_path: Path, path: Path | None) -> Path | None:
@@ -127,6 +143,7 @@ def resolve_path_from_config(config_path: Path, path: Path | None) -> Path | Non
     """
     # BDW: you're checking for None paths a lot.  That's likely something that
     # should be resolved way before we're calling this function.  
+    # YF: DISCUSS. The purpose was to normalize config file path.
     if path is None or path.is_absolute():
         return path
     return (config_path.parent / path).resolve()
@@ -149,6 +166,7 @@ def redact_aws_credentials(data: dict[str, Any]) -> dict[str, Any]:
         # aws_data[key] = "***"
         # which overwrites all of those fields and would create them if needed,
         # thus obscuring whether or not they were supplied.
+        # YF: DISCUSS. The purpose was to sanitize credentials from written into artifacts.
         if aws_data.get(key):
             aws_data[key] = "***"
     return data
