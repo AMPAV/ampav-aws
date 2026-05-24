@@ -1,6 +1,4 @@
-"""AWS Transcribe orchestration and CLI entrypoint for AMPAV."""
-
-from __future__ import annotations
+"""AWS Transcribe client and CLI for AMPAV."""
 
 import argparse
 from datetime import datetime, timezone
@@ -11,73 +9,33 @@ import re
 import time
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+import boto3
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ampav.core.logging import LOG_FORMAT
-from ampav.core.schema import ToolOutput, Transcript
-from ampav.core.utils import pretty_yaml
+from ampav.core.schema import ToolOutput
 
-from .artifacts import create_artifact_writer, read_json as read_file_json, write_json
-from .config import (
-    AWSSettings,
-    PathSettings,
-    S3Settings,
-    StrictBaseModel,
-    load_yaml_mapping,
-    redact_aws_credentials,
-    resolve_path_from_config,
-)
-from .errors import (
-    AWSConfigError,
-    AWSTranscribeJobError,
-    AWSTranscriptSchemaError,
-    AmpavAWSError,
-    is_aws_sdk_error,
-)
-from .s3 import S3Location, download_file, join_s3_key, read_json as read_s3_json, upload_file
-from .session import create_boto3_session
+from .errors import AwsTranscribeError, AwsTranscriptSchemaError, is_aws_sdk_error
+from .s3 import S3Location, join_s3_key, parse_s3_uri
+from .transcribe_contract import validate_aws_transcript_contract
 from .transcribe_conversion import aws_transcript_to_transcript
 
 
-class PollingSettings(StrictBaseModel):
-    """Polling behavior for waiting on AWS Transcribe jobs.
+class StrictModel(BaseModel):
+    """Pydantic base model for user-facing settings objects."""
 
-    :param interval_seconds: Seconds to wait between AWS status checks.
-        Defaults to ``30``.
-    :type interval_seconds: int
-    :param timeout_seconds: Maximum seconds to wait before failing. Optional;
-        when ``None``, polling does not time out.
-    :type timeout_seconds: int | None
-    """
+    model_config = ConfigDict(extra="forbid")
+
+
+class PollingSettings(StrictModel):
+    """Polling controls for waiting on an AWS Transcribe batch job."""
 
     interval_seconds: int = Field(default=30, ge=1)
     timeout_seconds: int | None = Field(default=7200, ge=1)
 
 
-class TranscriptionSettings(StrictBaseModel):
-    """AWS Transcribe job settings controlled by AMPAV config.
-
-    :param media_format: AWS media format. Optional; when ``None``, inferred
-        from the input file extension.
-    :type media_format: str | None
-    :param language_code: AWS language code used when language identification
-        is disabled. Defaults to ``"en-US"``.
-    :type language_code: str | None
-    :param identify_language: Enable AWS language identification. Defaults to
-        ``False``.
-    :type identify_language: bool
-    :param language_options: Optional language options passed to AWS when
-        language identification is enabled.
-    :type language_options: list[str]
-    :param show_speaker_labels: Request AWS speaker diarization. Defaults to
-        ``True``.
-    :type show_speaker_labels: bool
-    :param max_speaker_labels: Maximum number of AWS speaker labels. Defaults
-        to ``10``.
-    :type max_speaker_labels: int
-    :param job_name_prefix: Prefix for generated AWS Transcribe job names.
-    :type job_name_prefix: str
-    """
+class TranscriptionSettings(StrictModel):
+    """AWS Transcribe job settings supported by AMPAV."""
 
     media_format: str | None = None
     language_code: str | None = "en-US"
@@ -85,632 +43,511 @@ class TranscriptionSettings(StrictBaseModel):
     language_options: list[str] = Field(default_factory=list)
     show_speaker_labels: bool = True
     max_speaker_labels: int = Field(default=10, ge=2, le=30)
-    job_name_prefix: str = "ampav-aws-transcribe"
 
     @model_validator(mode="after")
-    def validate_language_settings(self) -> TranscriptionSettings:
-        """Validate the mutually exclusive AWS language configuration.
-
-        :return: The validated transcription settings instance.
-        :rtype: TranscriptionSettings
-        :raises ValueError: If no language code is configured while language
-            identification is disabled.
-        """
+    def validate_language_settings(self) -> "TranscriptionSettings":
         if not self.identify_language and not self.language_code:
             raise ValueError("language_code is required unless identify_language is true")
         return self
 
 
-class AWSTranscribeConfig(StrictBaseModel):
-    """Complete config object for running AWS Transcribe through AMPAV.
+class AwsTranscribeJob(StrictModel):
+    """Public handle for a submitted AWS Transcribe job."""
 
-    :param aws: AWS credential and region settings.
-    :type aws: AWSSettings
-    :param s3: S3 bucket and key-prefix settings.
-    :type s3: S3Settings
-    :param polling: Polling settings for AWS job completion.
-    :type polling: PollingSettings
-    :param transcription: AWS Transcribe job settings.
-    :type transcription: TranscriptionSettings
-    :param paths: Optional local artifact path settings.
-    :type paths: PathSettings
-    """
-
-    aws: AWSSettings = Field(default_factory=AWSSettings)
-    s3: S3Settings
-    polling: PollingSettings = Field(default_factory=PollingSettings)
-    transcription: TranscriptionSettings = Field(default_factory=TranscriptionSettings)
-    paths: PathSettings = Field(default_factory=PathSettings)
-
-
-class TranscribeRunResult(BaseModel):
-    """Metadata describing one AWS Transcribe execution.
-
-    :param job_name: AWS Transcribe job name.
-    :type job_name: str
-    :param status: Final AWS Transcribe job status.
-    :type status: str
-    :param input_uri: S3 URI for the uploaded input media.
-    :type input_uri: str
-    :param output_bucket: S3 bucket containing the raw AWS transcript JSON.
-    :type output_bucket: str
-    :param output_key: S3 key for the raw AWS transcript JSON.
-    :type output_key: str
-    :param run_dir: Optional local run artifact directory.
-    :type run_dir: Path | None
-    :param transcript_json: Optional local raw AWS transcript JSON path.
-    :type transcript_json: Path | None
-    :param status_history_json: Optional local polling history JSON path.
-    :type status_history_json: Path | None
-    :param log_file: Optional local run log file path.
-    :type log_file: Path | None
-    """
-
-    job_name: str
-    status: str
-    input_uri: str
+    name: str
+    media_uri: str
     output_bucket: str
     output_key: str
-    run_dir: Path | None = None
-    transcript_json: Path | None = None
-    status_history_json: Path | None = None
-    log_file: Path | None = None
+    media_was_uploaded: bool = False
+
+    @property
+    def output_location(self) -> S3Location:
+        """S3 location where AWS writes the transcript JSON."""
+        return S3Location(self.output_bucket, self.output_key)
+
+    @property
+    def media_location(self) -> S3Location:
+        """S3 location of the media submitted to AWS Transcribe."""
+        return parse_s3_uri(self.media_uri)
 
 
-class AWSTranscribeService:
-    """Thin wrapper around boto3 clients used by the Transcribe workflow.
+class AwsTranscribe:
+    """Low-level AWS Transcribe client used by the AMPAV API and CLI."""
 
-    :param config: Typed AWS Transcribe configuration.
-    :type config: AWSTranscribeConfig
-    """
+    def __init__(
+        self,
+        *,
+        region_name: str | None = None,
+        profile_name: str | None = None,
+        session: Any | None = None,
+        transcribe_client: Any | None = None,
+        s3_client: Any | None = None,
+    ):
+        """Create an AWS Transcribe client from boto3 session settings or injected clients.
 
-    def __init__(self, config: AWSTranscribeConfig):
-        """Create AWS Transcribe and S3 clients from a typed config object.
-
-        :param config: Typed AWS Transcribe configuration.
-        :type config: AWSTranscribeConfig
+        `profile_name` and `region_name` are passed to boto3's normal session
+        constructor. Tests and higher-level callers may pass already-created
+        clients to avoid owning credential/session setup here.
         """
-        session = create_boto3_session(config.aws)
-        self.config = config
-        self.transcribe_client = session.client("transcribe")
-        self.s3_client = session.client("s3")
+        if session is None and (transcribe_client is None or s3_client is None):
+            session = boto3.Session(region_name=region_name, profile_name=profile_name)
+        self.transcribe_client = transcribe_client or session.client("transcribe")
+        self.s3_client = s3_client or session.client("s3")
 
-    def upload_input(self, audiofile: Path, destination: S3Location) -> str:
-        """Upload an input audio file and return its S3 URI.
+    def submit(
+        self,
+        media_uri: str,
+        *,
+        output_bucket: str,
+        output_key: str | None = None,
+        output_prefix: str = "aws_transcribe/output",
+        job_name: str | None = None,
+        job_name_prefix: str = "ampav-aws-transcribe",
+        transcription: TranscriptionSettings | None = None,
+    ) -> AwsTranscribeJob:
+        """Submit an AWS Transcribe job for media that already exists in S3.
 
-        :param audiofile: Local audio file to upload.
-        :type audiofile: Path
-        :param destination: Destination S3 bucket/key.
-        :type destination: S3Location
-        :return: Uploaded media URI.
-        :rtype: str
+        The returned `AwsTranscribeJob` is the public handle callers can store,
+        poll, fetch, or clean up later.
         """
-        logging.info("Uploading %s to %s", audiofile, destination.uri)
-        upload_file(self.s3_client, audiofile, destination)
-        return destination.uri
+        transcription = transcription or TranscriptionSettings()
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        job_name = job_name or build_job_name(media_uri, job_name_prefix, timestamp)
+        output_key = output_key or join_s3_key(output_prefix, f"{job_name}.json")
+        request = build_start_job_request(
+            job_name=job_name,
+            media_uri=media_uri,
+            output_bucket=output_bucket,
+            output_key=output_key,
+            transcription=transcription,
+        )
 
-    def start_job(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Submit an AWS Transcribe start_transcription_job request.
+        logging.info("Starting AWS Transcribe job %s", job_name)
+        logging.debug("AWS Transcribe request: %s", json_for_log(request))
+        self.transcribe_client.start_transcription_job(**request)
+        return AwsTranscribeJob(
+            name=job_name,
+            media_uri=media_uri,
+            output_bucket=output_bucket,
+            output_key=output_key,
+        )
 
-        :param request: boto3 ``start_transcription_job`` request body.
-        :type request: dict[str, Any]
-        :return: AWS start job response.
-        :rtype: dict[str, Any]
+    def submit_file(
+        self,
+        audiofile: Path | str,
+        *,
+        output_bucket: str,
+        input_bucket: str | None = None,
+        input_key: str | None = None,
+        input_prefix: str = "aws_transcribe/input",
+        output_key: str | None = None,
+        output_prefix: str = "aws_transcribe/output",
+        job_name: str | None = None,
+        job_name_prefix: str = "ampav-aws-transcribe",
+        transcription: TranscriptionSettings | None = None,
+    ) -> AwsTranscribeJob:
+        """Upload a local media file to S3 and submit an AWS Transcribe job."""
+        audio_path = Path(audiofile).expanduser().resolve()
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Input audio file does not exist: {audio_path}")
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        job_name = job_name or build_job_name(str(audio_path), job_name_prefix, timestamp)
+        input_bucket = input_bucket or output_bucket
+        input_key = input_key or join_s3_key(input_prefix, f"{job_name}{audio_path.suffix}")
+        input_location = S3Location(input_bucket, input_key)
+
+        logging.info("Uploading %s to %s", audio_path, input_location.uri)
+        self.s3_client.upload_file(str(audio_path), input_location.bucket, input_location.key)
+
+        job = self.submit(
+            input_location.uri,
+            output_bucket=output_bucket,
+            output_key=output_key,
+            output_prefix=output_prefix,
+            job_name=job_name,
+            job_name_prefix=job_name_prefix,
+            transcription=transcription,
+        )
+        return job.model_copy(update={"media_was_uploaded": True})
+
+    def job_info(self, job_name: str | AwsTranscribeJob) -> dict[str, Any]:
+        """Return AWS metadata for a submitted transcription job."""
+        name = job_name.name if isinstance(job_name, AwsTranscribeJob) else job_name
+        return self.transcribe_client.get_transcription_job(TranscriptionJobName=name)
+
+    def list_jobs(self, **kwargs: Any) -> dict[str, Any]:
+        """Return AWS Transcribe job summaries using boto3 list arguments."""
+        return self.transcribe_client.list_transcription_jobs(**kwargs)
+
+    def wait(
+        self,
+        job: str | AwsTranscribeJob,
+        *,
+        polling: PollingSettings | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Poll until an AWS Transcribe job completes, fails, or times out.
+
+        Returns the final `get_transcription_job` response and a lightweight
+        status history that can be copied into `ToolOutput.tool_private`.
         """
-        logging.info("Starting AWS Transcribe job %s", request["TranscriptionJobName"])
-        return self.transcribe_client.start_transcription_job(**request)
+        polling = polling or PollingSettings()
+        job_name = job.name if isinstance(job, AwsTranscribeJob) else job
+        started = time.monotonic()
+        history: list[dict[str, Any]] = []
 
-    def get_job(self, job_name: str) -> dict[str, Any]:
-        """Fetch one AWS Transcribe job status response.
+        while True:
+            response = self.job_info(job_name)
+            job_data = response["TranscriptionJob"]
+            status = job_data["TranscriptionJobStatus"]
+            snapshot = {
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "status": status,
+                "failure_reason": job_data.get("FailureReason"),
+                "transcript_file_uri": job_data.get("Transcript", {}).get("TranscriptFileUri"),
+            }
+            history.append(snapshot)
+            logging.info("AWS Transcribe job %s status: %s", job_name, status)
 
-        :param job_name: AWS Transcribe job name.
-        :type job_name: str
-        :return: AWS get job response.
-        :rtype: dict[str, Any]
+            if status == "COMPLETED":
+                return response, history
+            if status == "FAILED":
+                reason = job_data.get("FailureReason", "no failure reason returned")
+                raise AwsTranscribeError(job_name, f"failed: {reason}")
+            if polling.timeout_seconds is not None and time.monotonic() - started > polling.timeout_seconds:
+                raise AwsTranscribeError(job_name, "did not finish within timeout")
+
+            time.sleep(polling.interval_seconds)
+
+    def get_transcript_json(self, job: AwsTranscribeJob) -> dict[str, Any]:
+        """Read and parse the raw AWS transcript JSON from the job output S3 object."""
+        logging.info("Reading raw AWS transcript from %s", job.output_location.uri)
+        response = self.s3_client.get_object(Bucket=job.output_bucket, Key=job.output_key)
+        with response["Body"] as body:
+            transcript = json.loads(body.read().decode("utf-8"))
+        if not isinstance(transcript, dict):
+            raise AwsTranscriptSchemaError("$", "AWS transcript JSON must contain an object")
+        return transcript
+
+    def get_transcription(
+        self,
+        job: AwsTranscribeJob,
+        *,
+        final_job: dict[str, Any] | None = None,
+        status_history: list[dict[str, Any]] | None = None,
+    ) -> ToolOutput:
+        """Fetch raw AWS output and convert it to an AMPAV `ToolOutput`.
+
+        Raw AWS job and transcript payloads are stored in `tool_private` for
+        troubleshooting. Normal clients should consume `output`.
         """
-        return self.transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
+        final_job = final_job or self.job_info(job)
+        aws_transcript = self.get_transcript_json(job)
+        aws_model = validate_aws_transcript_contract(aws_transcript)
+        transcript = aws_transcript_to_transcript(aws_model)
+        job_data = final_job.get("TranscriptionJob", {})
 
-    def download_transcript(self, source: S3Location, destination: Path) -> None:
-        """Download the raw AWS transcript JSON from S3.
+        output = ToolOutput(
+            tool_name="aws_transcribe",
+            parameters=tool_parameters(job, job_data),
+            queue_time=timestamp_or_none(job_data.get("CreationTime")),
+            start_time=timestamp_or_none(job_data.get("StartTime")) or timestamp_or_none(job_data.get("CreationTime")),
+            end_time=timestamp_or_none(job_data.get("CompletionTime")) or time.time(),
+            output=transcript,
+            tool_private={
+                "aws_transcribe_job": job.model_dump(mode="json"),
+                "raw_transcription_job": json_safe(final_job),
+                "raw_transcript": json_safe(aws_transcript),
+                "status_history": status_history or [],
+            },
+        )
+        return output
 
-        :param source: S3 location for the raw transcript JSON.
-        :type source: S3Location
-        :param destination: Local destination path.
-        :type destination: Path
+    def transcribe_uri(
+        self,
+        media_uri: str,
+        *,
+        output_bucket: str,
+        output_key: str | None = None,
+        output_prefix: str = "aws_transcribe/output",
+        job_name: str | None = None,
+        job_name_prefix: str = "ampav-aws-transcribe",
+        transcription: TranscriptionSettings | None = None,
+        polling: PollingSettings | None = None,
+        delete_job: bool = False,
+        delete_output: bool = False,
+    ) -> ToolOutput:
+        """Submit, wait for, and fetch a transcription for existing S3 media."""
+        job = self.submit(
+            media_uri,
+            output_bucket=output_bucket,
+            output_key=output_key,
+            output_prefix=output_prefix,
+            job_name=job_name,
+            job_name_prefix=job_name_prefix,
+            transcription=transcription,
+        )
+        final_job, history = self.wait(job, polling=polling)
+        output = self.get_transcription(job, final_job=final_job, status_history=history)
+        self.cleanup(job, delete_job=delete_job, delete_output=delete_output)
+        return output
+
+    def transcribe_file(
+        self,
+        audiofile: Path | str,
+        *,
+        output_bucket: str,
+        input_bucket: str | None = None,
+        input_key: str | None = None,
+        input_prefix: str = "aws_transcribe/input",
+        output_key: str | None = None,
+        output_prefix: str = "aws_transcribe/output",
+        job_name: str | None = None,
+        job_name_prefix: str = "ampav-aws-transcribe",
+        transcription: TranscriptionSettings | None = None,
+        polling: PollingSettings | None = None,
+        delete_job: bool = False,
+        delete_input: bool = False,
+        delete_output: bool = False,
+    ) -> ToolOutput:
+        """Transcribe local media or an `s3://` media URI and return AMPAV output.
+
+        Local paths are uploaded before submission. String values beginning with
+        `s3://` are treated as already-uploaded media and are not uploaded.
+        Cleanup flags are explicit and disabled by default.
         """
-        logging.info("Downloading raw AWS transcript from %s to %s", source.uri, destination)
-        download_file(self.s3_client, source, destination)
+        if isinstance(audiofile, str) and audiofile.startswith("s3://"):
+            return self.transcribe_uri(
+                audiofile,
+                output_bucket=output_bucket,
+                output_key=output_key,
+                output_prefix=output_prefix,
+                job_name=job_name,
+                job_name_prefix=job_name_prefix,
+                transcription=transcription,
+                polling=polling,
+                delete_job=delete_job,
+                delete_output=delete_output,
+            )
 
-    def read_transcript(self, source: S3Location) -> Any:
-        """Read the raw AWS transcript JSON directly from S3.
+        job = self.submit_file(
+            audiofile,
+            output_bucket=output_bucket,
+            input_bucket=input_bucket,
+            input_key=input_key,
+            input_prefix=input_prefix,
+            output_key=output_key,
+            output_prefix=output_prefix,
+            job_name=job_name,
+            job_name_prefix=job_name_prefix,
+            transcription=transcription,
+        )
+        final_job, history = self.wait(job, polling=polling)
+        output = self.get_transcription(job, final_job=final_job, status_history=history)
+        self.cleanup(job, delete_job=delete_job, delete_input=delete_input, delete_output=delete_output)
+        return output
 
-        :param source: S3 location for the raw transcript JSON.
-        :type source: S3Location
-        :return: Parsed AWS transcript JSON.
-        :rtype: Any
+    def cleanup(
+        self,
+        job: AwsTranscribeJob,
+        *,
+        delete_job: bool = False,
+        delete_input: bool = False,
+        delete_output: bool = False,
+    ) -> None:
+        """Delete selected AWS-side job/S3 resources.
+
+        Cleanup is intentionally opt-in. `delete_input` removes the media object
+        referenced by the job handle; use it only when this library uploaded or
+        otherwise owns that object.
         """
-        logging.info("Reading raw AWS transcript from %s", source.uri)
-        return read_s3_json(self.s3_client, source)
+        if delete_output:
+            self.s3_client.delete_object(Bucket=job.output_bucket, Key=job.output_key)
+        if delete_input:
+            media = job.media_location
+            self.s3_client.delete_object(Bucket=media.bucket, Key=media.key)
+        if delete_job:
+            self.transcribe_client.delete_transcription_job(TranscriptionJobName=job.name)
 
 
-def load_config(config_path: Path) -> AWSTranscribeConfig:
-    """Load and validate an AWS Transcribe YAML config file.
-
-    :param config_path: Path to the local YAML config file.
-    :type config_path: Path
-    :return: Typed AWS Transcribe config with relative paths resolved.
-    :rtype: AWSTranscribeConfig
-    :raises AWSConfigError: If the config cannot be read, parsed, or validated.
-    """
-    try:
-        config_path = config_path.expanduser().resolve()
-        config = AWSTranscribeConfig.model_validate(load_yaml_mapping(config_path))
-        config.paths.runs_dir = resolve_path_from_config(config_path, config.paths.runs_dir)
-        return config
-    except AWSConfigError:
-        raise
-    except ValidationError as exc:
-        raise AWSConfigError(f"Invalid AWS Transcribe config {config_path}: {exc}") from exc
-
-
-def transcribe_file(audiofile: Path, config_path: Path, debug: bool = False) -> ToolOutput:
-    """Transcribe a local file using config loaded from a YAML file.
-
-    :param audiofile: Local media file to upload and transcribe.
-    :type audiofile: Path
-    :param config_path: YAML config file containing AWS, S3, polling, and
-        transcription settings.
-    :type config_path: Path
-    :param debug: Enable debug logging. Defaults to ``False``.
-    :type debug: bool
-    :return: ToolOutput containing the normalized AMPAV Transcript and run metadata.
-    :rtype: ToolOutput
-    """
-    config_path = config_path.expanduser().resolve()
-    return transcribe_file_with_config(
-        audiofile=audiofile,
-        config=load_config(config_path),
-        config_path=config_path,
-        debug=debug,
-    )
-
-
-def transcribe_file_with_config(
-    audiofile: Path,
-    config: AWSTranscribeConfig,
-    config_path: Path | None = None,
-    debug: bool = False,
+def transcribe_file(
+    audiofile: Path | str,
+    *,
+    output_bucket: str,
+    region_name: str | None = None,
+    profile_name: str | None = None,
+    **kwargs: Any,
 ) -> ToolOutput:
-    """Transcribe a local file using an already-loaded config object.
-
-    :param audiofile: Local media file to upload and transcribe.
-    :type audiofile: Path
-    :param config: Typed AWS Transcribe configuration.
-    :type config: AWSTranscribeConfig
-    :param config_path: Optional path to the config file that produced
-        ``config``. Included in ToolOutput parameters when provided.
-    :type config_path: Path | None
-    :param debug: Enable debug logging. Defaults to ``False``.
-    :type debug: bool
-    :return: ToolOutput containing the normalized AMPAV Transcript and run metadata.
-    :rtype: ToolOutput
-    """
-    audiofile = audiofile.expanduser().resolve()
-    if not audiofile.exists():
-        raise FileNotFoundError(f"Input audio file does not exist: {audiofile}")
-
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    job_name = build_job_name(audiofile, config.transcription.job_name_prefix, timestamp)
-    artifacts = create_artifact_writer(config.paths.runs_dir, timestamp, job_name)
-    log_file = artifacts.path("aws_transcribe.log")
-    configure_logging(log_file, debug=debug)
-
-    output = ToolOutput(
-        tool_name="aws_transcribe",
-        parameters=initial_tool_parameters(audiofile, config_path, config),
-    )
-    output.setup_logging()
-
-    logging.info("Starting AWS Transcribe run")
-    logging.info("Input audio: %s", audiofile)
-    if artifacts.run_dir is not None:
-        logging.info("Run directory: %s", artifacts.run_dir)
-    else:
-        logging.info("Run artifact persistence is disabled")
-
-    service = AWSTranscribeService(config)
-    input_location = S3Location(
-        bucket=config.s3.bucket,
-        key=join_s3_key(config.s3.input_prefix, f"{job_name}{audiofile.suffix}"),
-    )
-    output_location = S3Location(
-        bucket=config.s3.bucket,
-        key=join_s3_key(config.s3.output_prefix, f"{job_name}.json"),
-    )
-    transcript_json_path = artifacts.path("aws_transcript.json")
-    status_history_path = artifacts.path("status_history.json")
-
-    input_uri = service.upload_input(audiofile, input_location)
-    request = build_start_job_request(config, job_name, input_uri, output_location.key, audiofile)
-    artifacts.write_json("request.json", request)
-    artifacts.write_json("config.redacted.json", redacted_config(config))
-    logging.debug("AWS Transcribe request: %s", json_for_log(request))
-
-    output.queue_time = time.time()
-    start_response = service.start_job(request)
-    artifacts.write_json("start_response.json", start_response)
-    logging.debug("AWS Transcribe start response: %s", json_for_log(start_response))
-
-    final_job, status_history = poll_until_complete(
-        service=service,
-        job_name=job_name,
-        polling=config.polling,
-        status_history_path=status_history_path,
-    )
-    artifacts.write_json("transcription_job.json", final_job)
-    logging.debug("AWS Transcribe final job: %s", json_for_log(final_job))
-    logging.debug("AWS Transcribe status history: %s", json_for_log(status_history))
-
-    aws_transcript = read_aws_transcript(service, output_location, transcript_json_path)
-    logging.info("AWS Transcribe job completed")
-    result = TranscribeRunResult(
-        job_name=job_name,
-        status=final_job["TranscriptionJob"]["TranscriptionJobStatus"],
-        input_uri=input_uri,
-        output_bucket=output_location.bucket,
-        output_key=output_location.key,
-        run_dir=artifacts.run_dir,
-        transcript_json=transcript_json_path,
-        status_history_json=status_history_path,
-        log_file=log_file,
-    )
-    artifacts.write_json("run_result.json", result.model_dump(mode="json"))
-
-    transcript = aws_transcript_to_transcript(aws_transcript)
-    logging.info("Saved %d polling status snapshots", len(status_history))
-    logging.info(
-        "Converted AWS transcript to AMPAV schema with %d paragraphs and %d words",
-        len(transcript.paragraphs),
-        len(transcript.words),
-    )
-    return finalize_tool_output(
-        output=output,
-        transcript=transcript,
-        run_result=result,
-        final_job=final_job,
-    )
+    """Convenience API for transcribing a local path or `s3://` media URI."""
+    client = AwsTranscribe(region_name=region_name, profile_name=profile_name)
+    return client.transcribe_file(audiofile, output_bucket=output_bucket, **kwargs)
 
 
-def read_aws_transcript(
-    service: AWSTranscribeService,
-    source: S3Location,
-    transcript_json_path: Path | None,
-) -> dict[str, Any]:
-    """Read or download raw AWS transcript JSON for conversion.
-
-    :param service: AWS Transcribe service wrapper with S3 access.
-    :type service: AWSTranscribeService
-    :param source: S3 location for the raw AWS transcript JSON.
-    :type source: S3Location
-    :param transcript_json_path: Optional local path for downloading the raw
-        transcript. When ``None``, the JSON is read directly from S3.
-    :type transcript_json_path: Path | None
-    :return: Raw AWS transcript JSON object.
-    :rtype: dict[str, Any]
-    :raises AWSTranscriptSchemaError: If the raw JSON root is not an object.
-    """
-    if transcript_json_path is None:
-        aws_transcript = service.read_transcript(source)
-    else:
-        service.download_transcript(source, transcript_json_path)
-        aws_transcript = read_file_json(transcript_json_path)
-    if not isinstance(aws_transcript, dict):
-        raise AWSTranscriptSchemaError("$", "AWS transcript JSON must contain an object")
-    return aws_transcript
-
-
-def initial_tool_parameters(
-    audiofile: Path,
-    config_path: Path | None,
-    config: AWSTranscribeConfig,
-) -> dict[str, Any]:
-    """Build initial ToolOutput parameters known before AWS submission.
-
-    :param audiofile: Local media file being transcribed.
-    :type audiofile: Path
-    :param config_path: Optional config path included for traceability.
-    :type config_path: Path | None
-    :param config: Typed AWS Transcribe configuration.
-    :type config: AWSTranscribeConfig
-    :return: ToolOutput parameter dictionary.
-    :rtype: dict[str, Any]
-    """
-    parameters = {
-        "content_source": str(audiofile),
-        "config": str(config_path) if config_path is not None else None,
-        "aws_region": config.aws.region,
-        "language_code": config.transcription.language_code,
-        "identify_language": config.transcription.identify_language,
-        "language_options": config.transcription.language_options,
-    }
-    return {key: value for key, value in parameters.items() if value is not None}
-
-
-def finalize_tool_output(
-    output: ToolOutput,
-    transcript: Transcript,
-    run_result: TranscribeRunResult,
-    final_job: dict[str, Any],
+def transcribe_uri(
+    media_uri: str,
+    *,
+    output_bucket: str,
+    region_name: str | None = None,
+    profile_name: str | None = None,
+    **kwargs: Any,
 ) -> ToolOutput:
-    """Attach final run metadata and normalized transcript to ToolOutput.
-
-    :param output: ToolOutput created before AWS submission.
-    :type output: ToolOutput
-    :param transcript: Normalized AMPAV transcript.
-    :type transcript: Transcript
-    :param run_result: Metadata for this AWS Transcribe run.
-    :type run_result: TranscribeRunResult
-    :param final_job: Final AWS ``get_transcription_job`` response.
-    :type final_job: dict[str, Any]
-    :return: The updated ToolOutput instance.
-    :rtype: ToolOutput
-    """
-    job_data = final_job.get("TranscriptionJob", {})
-    parameters = {
-        **output.parameters,
-        "status": run_result.status,
-        "job_name": run_result.job_name,
-        "s3_input_uri": run_result.input_uri,
-        "s3_output_bucket": run_result.output_bucket,
-        "s3_output_key": run_result.output_key,
-        "run_dir": str(run_result.run_dir) if run_result.run_dir is not None else None,
-        "raw_transcript_json": str(run_result.transcript_json) if run_result.transcript_json else None,
-        "status_history_json": str(run_result.status_history_json) if run_result.status_history_json else None,
-        "log_file": str(run_result.log_file) if run_result.log_file else None,
-    }
-    output.parameters = {key: value for key, value in parameters.items() if value is not None}
-    output.start_time = timestamp_or_none(job_data.get("StartTime")) or timestamp_or_none(job_data.get("CreationTime"))
-    output.end_time = timestamp_or_none(job_data.get("CompletionTime")) or time.time()
-    output.output = transcript
-    return output
-
-
-def timestamp_or_none(value: object) -> float | None:
-    """Convert boto3 datetime values to POSIX timestamps.
-
-    :param value: Value returned by boto3, usually ``datetime`` or ``None``.
-    :type value: object
-    :return: POSIX timestamp or ``None`` when value is not a datetime.
-    :rtype: float | None
-    """
-    if isinstance(value, datetime):
-        return value.timestamp()
-    return None
+    """Convenience API for transcribing media that already exists in S3."""
+    client = AwsTranscribe(region_name=region_name, profile_name=profile_name)
+    return client.transcribe_uri(media_uri, output_bucket=output_bucket, **kwargs)
 
 
 def build_start_job_request(
-    config: AWSTranscribeConfig,
+    *,
     job_name: str,
-    input_uri: str,
+    media_uri: str,
+    output_bucket: str,
     output_key: str,
-    audiofile: Path,
+    transcription: TranscriptionSettings,
 ) -> dict[str, Any]:
-    """Build the boto3 start_transcription_job request body.
-
-    :param config: Typed AWS Transcribe configuration.
-    :type config: AWSTranscribeConfig
-    :param job_name: Generated AWS Transcribe job name.
-    :type job_name: str
-    :param input_uri: S3 URI of the uploaded input media.
-    :type input_uri: str
-    :param output_key: S3 key where AWS should write transcript JSON.
-    :type output_key: str
-    :param audiofile: Local media file, used to infer media format when needed.
-    :type audiofile: Path
-    :return: boto3 ``start_transcription_job`` request body.
-    :rtype: dict[str, Any]
-    """
-    media_format = config.transcription.media_format or infer_media_format(audiofile)
+    """Build a boto3 `start_transcription_job` request body."""
     request: dict[str, Any] = {
         "TranscriptionJobName": job_name,
-        "Media": {"MediaFileUri": input_uri},
-        "MediaFormat": media_format,
-        "OutputBucketName": config.s3.bucket,
+        "Media": {"MediaFileUri": media_uri},
+        "MediaFormat": transcription.media_format or infer_media_format(media_uri),
+        "OutputBucketName": output_bucket,
         "OutputKey": output_key,
     }
 
-    if config.transcription.identify_language:
+    if transcription.identify_language:
         request["IdentifyLanguage"] = True
-        if config.transcription.language_options:
-            request["LanguageOptions"] = config.transcription.language_options
+        if transcription.language_options:
+            request["LanguageOptions"] = transcription.language_options
     else:
-        request["LanguageCode"] = config.transcription.language_code
+        request["LanguageCode"] = transcription.language_code
 
-    settings: dict[str, Any] = {}
-    if config.transcription.show_speaker_labels:
-        settings["ShowSpeakerLabels"] = True
-        settings["MaxSpeakerLabels"] = config.transcription.max_speaker_labels
-    if settings:
-        request["Settings"] = settings
+    if transcription.show_speaker_labels:
+        request["Settings"] = {
+            "ShowSpeakerLabels": True,
+            "MaxSpeakerLabels": transcription.max_speaker_labels,
+        }
 
     return request
 
 
-def poll_until_complete(
-    service: AWSTranscribeService,
-    job_name: str,
-    polling: PollingSettings,
-    status_history_path: Path | None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Poll AWS Transcribe until a job completes, fails, or times out.
-
-    :param service: AWS Transcribe service wrapper.
-    :type service: AWSTranscribeService
-    :param job_name: AWS Transcribe job name to poll.
-    :type job_name: str
-    :param polling: Polling interval and timeout settings.
-    :type polling: PollingSettings
-    :param status_history_path: Optional path for persisting polling snapshots.
-    :type status_history_path: Path | None
-    :return: Final AWS job response and polling status history.
-    :rtype: tuple[dict[str, Any], list[dict[str, Any]]]
-    :raises AWSTranscribeJobError: If the job fails or polling times out.
-    """
-    started = time.monotonic()
-    history: list[dict[str, Any]] = []
-
-    while True:
-        job = service.get_job(job_name)
-        job_data = job["TranscriptionJob"]
-        status = job_data["TranscriptionJobStatus"]
-        snapshot = {
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-            "status": status,
-            "failure_reason": job_data.get("FailureReason"),
-            "transcript_file_uri": job_data.get("Transcript", {}).get("TranscriptFileUri"),
-        }
-        history.append(snapshot)
-        if status_history_path is not None:
-            write_json(status_history_path, history)
-        logging.info("AWS Transcribe job %s status: %s", job_name, status)
-
-        if status == "COMPLETED":
-            return job, history
-        if status == "FAILED":
-            reason = job_data.get("FailureReason", "no failure reason returned")
-            raise AWSTranscribeJobError(job_name, f"failed: {reason}")
-        if polling.timeout_seconds is not None and time.monotonic() - started > polling.timeout_seconds:
-            raise AWSTranscribeJobError(job_name, "did not finish within timeout")
-
-        time.sleep(polling.interval_seconds)
-
-
-def configure_logging(log_file: Path | None, debug: bool = False) -> None:
-    """Configure console logging and optional per-run file logging.
-
-    :param log_file: Optional log file path. When ``None``, file logging is
-        disabled.
-    :type log_file: Path | None
-    :param debug: Enable debug logging. Defaults to ``False``.
-    :type debug: bool
-    """
-    level = logging.DEBUG if debug else logging.INFO
-    formatter = logging.Formatter(LOG_FORMAT)
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-
-    for handler in list(root_logger.handlers):
-        root_logger.removeHandler(handler)
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    stream_handler.setLevel(level)
-    root_logger.addHandler(stream_handler)
-
-    if log_file is not None:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        file_handler.setLevel(level)
-        root_logger.addHandler(file_handler)
-
-
-def build_job_name(audiofile: Path, prefix: str, timestamp: str) -> str:
-    """Build an AWS-compatible Transcribe job name.
-
-    :param audiofile: Local media file used for the job-name stem.
-    :type audiofile: Path
-    :param prefix: Configured job-name prefix.
-    :type prefix: str
-    :param timestamp: Timestamp string included to make names unique.
-    :type timestamp: str
-    :return: AWS-compatible Transcribe job name.
-    :rtype: str
-    """
+def build_job_name(source: str | Path, prefix: str, timestamp: str) -> str:
     safe_prefix = safe_job_part(prefix) or "ampav-aws-transcribe"
-    safe_stem = safe_job_part(audiofile.stem) or "audio"
+    safe_stem = safe_job_part(Path(str(source).rstrip("/")).stem) or "media"
     max_stem_length = max(1, 200 - len(safe_prefix) - len(timestamp) - 2)
     return f"{safe_prefix}-{timestamp}-{safe_stem[:max_stem_length]}".strip("-")
 
 
 def safe_job_part(value: str) -> str:
-    """Sanitize a string for use in AWS Transcribe job names.
-
-    :param value: Raw job-name component.
-    :type value: str
-    :return: Sanitized job-name component.
-    :rtype: str
-    """
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
 
 
-def infer_media_format(audiofile: Path) -> str:
-    """Infer AWS Transcribe MediaFormat from a local file extension.
-
-    :param audiofile: Local media file.
-    :type audiofile: Path
-    :return: Lowercase extension without the leading dot.
-    :rtype: str
-    :raises ValueError: If the file has no extension.
-    """
-    media_format = audiofile.suffix.lower().lstrip(".")
+def infer_media_format(source: str | Path) -> str:
+    media_format = Path(str(source)).suffix.lower().lstrip(".")
     if not media_format:
-        raise ValueError("media_format must be configured when the input file has no extension")
+        raise ValueError("media_format is required when the media URI or file has no extension")
     return media_format
 
 
-def redacted_config(config: AWSTranscribeConfig) -> dict[str, Any]:
-    """Return a serialized config with AWS credentials redacted.
+def timestamp_or_none(value: object) -> float | None:
+    return value.timestamp() if isinstance(value, datetime) else None
 
-    :param config: Typed AWS Transcribe configuration.
-    :type config: AWSTranscribeConfig
-    :return: Serialized config dictionary with credential values redacted.
-    :rtype: dict[str, Any]
-    """
-    return redact_aws_credentials(config.model_dump(mode="json"))
+
+def tool_parameters(job: AwsTranscribeJob, job_data: dict[str, Any]) -> dict[str, Any]:
+    parameters = {
+        "content_source": job.media_uri,
+        "media_was_uploaded": job.media_was_uploaded,
+        "output_bucket": job.output_bucket,
+        "output_key": job.output_key,
+        "language_code": job_data.get("LanguageCode"),
+        "identified_language_score": job_data.get("IdentifiedLanguageScore"),
+    }
+    return {key: value for key, value in parameters.items() if value is not None}
 
 
 def json_for_log(data: Any) -> str:
-    """Serialize data for compact debug logging.
-
-    :param data: Value to serialize.
-    :type data: Any
-    :return: JSON string suitable for logs.
-    :rtype: str
-    """
     return json.dumps(data, default=str, sort_keys=True)
 
 
-def cli_aws_transcribe() -> None:
-    """CLI entrypoint for AWS Transcribe."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("file", help="Audio file to transcribe using AWS Transcribe")
-    parser.add_argument("--config", required=True, type=Path, help="Path to local AWS Transcribe YAML config")
+def json_safe(data: Any) -> Any:
+    return json.loads(json.dumps(data, default=str))
+
+
+def configure_logging(debug: bool = False) -> None:
+    logging.basicConfig(format=LOG_FORMAT, level=logging.DEBUG if debug else logging.INFO)
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    """Build the AWS Transcribe CLI parser."""
+    parser = argparse.ArgumentParser(description="Transcribe media with AWS Transcribe and print AMPAV ToolOutput YAML.")
+    parser.add_argument("media", help="Local media path or s3://bucket/key media URI")
+    parser.add_argument("--output-bucket", required=True, help="S3 bucket where AWS writes the transcript JSON")
+    parser.add_argument("--output-key", help="S3 key where AWS writes the transcript JSON")
+    parser.add_argument("--output-prefix", default="aws_transcribe/output", help="S3 prefix for generated output keys")
+    parser.add_argument("--input-bucket", help="S3 bucket for uploading a local media file; defaults to output bucket")
+    parser.add_argument("--input-key", help="S3 key for uploading a local media file")
+    parser.add_argument("--input-prefix", default="aws_transcribe/input", help="S3 prefix for generated input keys")
+    parser.add_argument("--job-name", help="AWS Transcribe job name; generated when omitted")
+    parser.add_argument("--job-name-prefix", default="ampav-aws-transcribe", help="Prefix for generated job names")
+    parser.add_argument("--media-format", help="AWS media format; inferred from extension when omitted")
+    parser.add_argument("--language-code", default="en-US", help="AWS language code when language identification is off")
+    parser.add_argument("--identify-language", action="store_true", help="Enable AWS language identification")
+    parser.add_argument("--language-option", action="append", default=[], help="Allowed language when identifying language")
+    parser.add_argument("--no-speaker-labels", action="store_true", help="Disable AWS speaker diarization")
+    parser.add_argument("--max-speaker-labels", type=int, default=10, help="Maximum AWS speaker labels")
+    parser.add_argument("--profile", help="AWS profile name for boto3 session")
+    parser.add_argument("--region", help="AWS region for boto3 session")
+    parser.add_argument("--poll-interval", type=int, default=30, help="Seconds between job status checks")
+    parser.add_argument("--timeout", type=int, default=7200, help="Maximum seconds to wait for completion")
+    parser.add_argument("--delete-job", action="store_true", help="Delete AWS Transcribe job after fetching output")
+    parser.add_argument("--delete-input", action="store_true", help="Delete input S3 object after fetching output")
+    parser.add_argument("--delete-output", action="store_true", help="Delete output S3 object after fetching output")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    args = parser.parse_args()
+    return parser
+
+
+def cli_aws_transcribe() -> None:
+    """Console entry point for `ampav_aws_transcribe`."""
+    args = build_cli_parser().parse_args()
+    configure_logging(args.debug)
+
+    transcription = TranscriptionSettings(
+        media_format=args.media_format,
+        language_code=args.language_code,
+        identify_language=args.identify_language,
+        language_options=args.language_option,
+        show_speaker_labels=not args.no_speaker_labels,
+        max_speaker_labels=args.max_speaker_labels,
+    )
+    polling = PollingSettings(interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
+    client = AwsTranscribe(region_name=args.region, profile_name=args.profile)
 
     try:
-        result = transcribe_file(Path(args.file), args.config, debug=args.debug)
+        result = client.transcribe_file(
+            args.media,
+            output_bucket=args.output_bucket,
+            input_bucket=args.input_bucket,
+            input_key=args.input_key,
+            input_prefix=args.input_prefix,
+            output_key=args.output_key,
+            output_prefix=args.output_prefix,
+            job_name=args.job_name,
+            job_name_prefix=args.job_name_prefix,
+            transcription=transcription,
+            polling=polling,
+            delete_job=args.delete_job,
+            delete_input=args.delete_input,
+            delete_output=args.delete_output,
+        )
     except Exception as exc:
         if not is_cli_error(exc):
             raise
-        logging.basicConfig(format=LOG_FORMAT, level=logging.DEBUG if args.debug else logging.INFO)
         logging.error("%s", exc)
         raise SystemExit(1) from exc
 
-    print(pretty_yaml(result.model_dump(mode="json", exclude_none=True), sort_keys=False))
+    print(result.model_dump_yaml(sort_keys=False))
 
 
 def is_cli_error(exc: BaseException) -> bool:
-    """Return whether the CLI should report an exception as a user-facing error.
-
-    :param exc: Exception raised while running the CLI.
-    :type exc: BaseException
-    :return: ``True`` when the CLI should log the error and exit nonzero.
-    :rtype: bool
-    """
-    return isinstance(exc, (AmpavAWSError, ValidationError, OSError, RuntimeError, TimeoutError, ValueError)) or (
-        is_aws_sdk_error(exc)
-    )
+    return isinstance(exc, (AwsTranscribeError, OSError, RuntimeError, TimeoutError, ValueError)) or is_aws_sdk_error(exc)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 [project]
 name = "ampav-aws"
-version = "0.0.1"
+version = "0.0.2"
 description = "AWS tooling for the AMPAV environment"
 readme = "README.md"
 license = "Apache-2.0"
@@ -14,8 +14,7 @@ authors = [
 
 requires-python = ">=3.12"
 dependencies = [
-    "ampav-core>=0.0.12",
-    "boto3",
+    "ampav-core>=0.0.14",
 ]
 
 [project.urls]
