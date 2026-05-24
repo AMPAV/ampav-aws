@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import copy
 import json
 import unittest
@@ -11,7 +9,7 @@ from ampav.aws.transcribe_conversion import aws_transcript_to_transcript
 FIXTURE = Path(__file__).parent / "fixtures" / "aws_transcript_opendoor.json"
 
 
-class AWSTranscribeConversionTest(unittest.TestCase):
+class AwsTranscribeConversionTest(unittest.TestCase):
     def load_fixture(self) -> dict:
         return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
@@ -23,9 +21,10 @@ class AWSTranscribeConversionTest(unittest.TestCase):
         self.assertEqual([word.to_str() for word in transcript.words], ["Please", "open", "the", "door."])
         self.assertEqual(len(transcript.words), 4)
         self.assertEqual(transcript.words[0].speaker, "spk_0")
-        self.assertEqual(transcript.words[0].tool_specific["confidence"], 0.999)
+        self.assertEqual(transcript.words[0].confidence, 0.999)
+        self.assertEqual(transcript.words[0].tool_private["aws_item_id"], 0)
         self.assertEqual(transcript.words[-1].suffix, ".")
-        self.assertEqual(transcript.words[-1].tool_specific["aws_punctuation"][0]["content"], ".")
+        self.assertEqual(transcript.words[-1].tool_private["aws_punctuation"][0]["content"], ".")
 
         self.assertEqual(len(transcript.paragraphs), 1)
         paragraph = transcript.paragraphs[0]
@@ -33,7 +32,7 @@ class AWSTranscribeConversionTest(unittest.TestCase):
         self.assertEqual(paragraph.speaker, "spk_0")
         self.assertEqual(paragraph.start_time, 0.0)
         self.assertEqual(paragraph.end_time, 1.649)
-        self.assertEqual(paragraph.tool_specific["aws_segment_type"], "audio_segment")
+        self.assertEqual(paragraph.tool_private["aws_segment_type"], "audio_segment")
 
     def test_falls_back_to_speaker_label_segments(self) -> None:
         data = copy.deepcopy(self.load_fixture())
@@ -47,7 +46,7 @@ class AWSTranscribeConversionTest(unittest.TestCase):
         self.assertEqual(paragraph.speaker, "spk_0")
         self.assertEqual(paragraph.start_time, 0.0)
         self.assertEqual(paragraph.end_time, 1.649)
-        self.assertEqual(paragraph.tool_specific["aws_segment_type"], "speaker_label")
+        self.assertEqual(paragraph.tool_private["aws_segment_type"], "speaker_label")
 
 
 if __name__ == "__main__":

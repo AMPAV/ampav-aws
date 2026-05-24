@@ -1,0 +1,26 @@
+# Example application-owned config for examples/aws_transcribe_with_yaml_config.py.
+# Secrets are intentionally omitted; boto3 resolves credentials from profiles,
+# environment variables, credential files, or role credentials.
+
+aws:
+  region: YOUR_AWS_REGION
+  profile_name: YOUR_AWS_PROFILE
+
+s3:
+  output_bucket: YOUR_TRANSCRIBE_BUCKET
+  input_bucket: YOUR_TRANSCRIBE_BUCKET
+  input_prefix: aws_transcribe/input
+  output_prefix: aws_transcribe/output
+
+polling:
+  interval_seconds: 30
+  timeout_seconds: 7200
+
+transcription:
+  media_format: wav
+  language_code: en-US
+  identify_language: false
+  language_options: []
+  show_speaker_labels: true
+  max_speaker_labels: 10
+  job_name_prefix: ampav-aws-transcribe

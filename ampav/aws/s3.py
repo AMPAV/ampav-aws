@@ -1,100 +1,32 @@
-"""Small S3 helper functions shared by AMPAV AWS tools."""
+"""Small AWS S3 URI helpers."""
 
-from __future__ import annotations
-
-import json
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-
-from .errors import AWSArtifactError
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
 class S3Location:
-    """A bucket/key pair identifying an object in S3.
-
-    :param bucket: S3 bucket name.
-    :type bucket: str
-    :param key: Object key within the bucket.
-    :type key: str
-    """
+    """Parsed S3 object location."""
 
     bucket: str
     key: str
 
     @property
     def uri(self) -> str:
-        """Return the location as an s3:// URI.
-
-        :return: S3 URI in ``s3://bucket/key`` form.
-        :rtype: str
-        """
+        """Return the location as an `s3://bucket/key` URI."""
         return f"s3://{self.bucket}/{self.key}"
 
 
-def join_s3_key(prefix: str, filename: str) -> str:
-    """Join an S3 key prefix and filename without duplicate slashes.
-
-    :param prefix: S3 key prefix. Empty strings are allowed.
-    :type prefix: str
-    :param filename: Leaf object name to append to the prefix.
-    :type filename: str
-    :return: Combined S3 key.
-    :rtype: str
-    """
-    clean_prefix = prefix.strip("/")
-    return f"{clean_prefix}/{filename}" if clean_prefix else filename
+def parse_s3_uri(uri: str) -> S3Location:
+    """Parse an `s3://bucket/key` URI into bucket and key parts."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+        raise ValueError(f"Expected S3 URI in s3://bucket/key form, got {uri!r}")
+    return S3Location(bucket=parsed.netloc, key=parsed.path.lstrip("/"))
 
 
-def upload_file(s3_client: Any, source: Path, destination: S3Location) -> None:
-    """Upload a local file to an S3 destination.
-
-    :param s3_client: boto3 S3 client.
-    :type s3_client: Any
-    :param source: Local file to upload.
-    :type source: Path
-    :param destination: Destination bucket/key.
-    :type destination: S3Location
-    """
-    try:
-        s3_client.upload_file(str(source), destination.bucket, destination.key)
-    except Exception as exc:
-        raise AWSArtifactError(f"Could not upload {source} to {destination.uri}: {exc}") from exc
-
-
-def download_file(s3_client: Any, source: S3Location, destination: Path) -> None:
-    """Download an S3 object into a local file.
-
-    :param s3_client: boto3 S3 client.
-    :type s3_client: Any
-    :param source: Source bucket/key.
-    :type source: S3Location
-    :param destination: Local file path to write.
-    :type destination: Path
-    """
-    try:
-        s3_client.download_file(source.bucket, source.key, str(destination))
-    except Exception as exc:
-        raise AWSArtifactError(f"Could not download {source.uri} to {destination}: {exc}") from exc
-
-
-def read_json(s3_client: Any, source: S3Location) -> Any:
-    """Read an S3 object and parse it as JSON.
-
-    :param s3_client: boto3 S3 client.
-    :type s3_client: Any
-    :param source: Source bucket/key.
-    :type source: S3Location
-    :return: Parsed JSON value.
-    :rtype: Any
-    :raises AWSArtifactError: If the S3 object body is not valid JSON.
-    """
-    try:
-        response = s3_client.get_object(Bucket=source.bucket, Key=source.key)
-        with response["Body"] as body:
-            return json.loads(body.read().decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise AWSArtifactError(f"Could not parse JSON from {source.uri}: {exc}") from exc
-    except Exception as exc:
-        raise AWSArtifactError(f"Could not read JSON from {source.uri}: {exc}") from exc
+def join_s3_key(prefix: str | None, filename: str) -> str:
+    """Join an optional S3 prefix and object filename without leading slashes."""
+    clean_prefix = (prefix or "").strip("/")
+    clean_filename = filename.lstrip("/")
+    return f"{clean_prefix}/{clean_filename}" if clean_prefix else clean_filename

@@ -4,99 +4,118 @@ AWS tooling for AMPAV.
 
 ## AWS Transcribe
 
-AWS Transcribe support is available as both a Python API and a CLI. The library
-returns an AMPAV `ToolOutput` whose `output` is an AMPAV `Transcript`.
+`ampav-aws` provides a small AWS Transcribe client plus a CLI. It returns AMPAV
+`ToolOutput` objects whose `output` is an AMPAV `Transcript`.
 
-### CLI usage
+The library API is job-oriented: submit a job, wait for completion, fetch the
+transcript, and optionally clean up AWS-side resources. It supports both existing
+`s3://bucket/key` media and local files that need to be uploaded first.
 
-Create a real config from `examples/aws_config.example.yaml`, place it outside
-the repo or in another ignored local runtime directory, then run:
+## Python API
 
-```bash
-ampav_aws_transcribe PATH_TO_AUDIO_FILE --config PATH_TO_LOCAL_AWS_CONFIG_YAML
-```
-
-Use `--debug` to include AWS request/response metadata in logs:
-
-```bash
-ampav_aws_transcribe tests/fixtures/OpenDoor.wav --config /path/to/aws_config.yaml --debug
-```
-
-Do not put real AWS credentials on the command line. Use a local config file, an
-AWS profile, or the normal boto3 credential chain. For notebook users, a local
-YAML config file is the simplest workflow; keep real configs out of git and
-restrict local file permissions when possible.
-
-### Python API
+Use an existing S3 media object:
 
 ```python
-from pathlib import Path
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 
-from ampav.aws.transcribe import load_config, transcribe_file_with_config
-
-config = load_config(Path("/path/to/aws_config.yaml"))
-result = transcribe_file_with_config(Path("tests/fixtures/OpenDoor.wav"), config=config)
+aws = AwsTranscribe(region_name="us-east-2", profile_name="my-profile")
+result = aws.transcribe_uri(
+    "s3://my-bucket/input/audio.wav",
+    output_bucket="my-bucket",
+    output_key="output/audio.json",
+    transcription=TranscriptionSettings(language_code="en-US"),
+)
 
 print(result.output.text)
 ```
 
-The returned `ToolOutput` includes:
+Use a local file:
 
-- `tool_name`: `aws_transcribe`
-- `parameters`: input path, AWS job name, S3 input/output locations, and optional artifact paths
-- `messages`: log messages emitted during the run
-- `output`: normalized AMPAV `Transcript` with text, words, paragraphs, speaker labels, and AWS confidence in word `tool_specific`
+```python
+from pathlib import Path
 
-### Runtime artifacts
+from ampav.aws.transcribe import AwsTranscribe
 
-By default, local artifact persistence is disabled:
-
-```yaml
-paths:
-  runs_dir: null
+aws = AwsTranscribe(region_name="us-east-2")
+result = aws.transcribe_file(
+    Path("tests/fixtures/OpenDoor.wav"),
+    output_bucket="my-bucket",
+    input_prefix="aws_transcribe/input",
+    output_prefix="aws_transcribe/output",
+)
 ```
 
-When `paths.runs_dir` is configured, each execution creates a timestamped run
-directory containing debug artifacts such as:
+For lower-level control, call `submit()`, `submit_file()`, `wait()`, and
+`get_transcription()` directly. `submit()` returns an `AwsTranscribeJob` with the
+AWS job name and S3 locations.
 
-- `aws_transcribe.log`
-- `request.json`
-- `start_response.json`
-- `status_history.json`
-- `transcription_job.json`
-- `aws_transcript.json`
-- `run_result.json`
+`ToolOutput.tool_private` contains raw AWS job/transcript data for
+troubleshooting. Normal client code should use `ToolOutput.output`.
 
-These artifacts are for troubleshooting. External clients and notebooks should
-decide when and where to persist the returned `ToolOutput`.
+## CLI
 
-Runtime data belongs outside this repo in a local developer workspace when used:
+The CLI is a thin wrapper over the Python API:
 
-
-```text
-PATH_TO_LOCAL_RUNTIME_WORKSPACE/
-  config/
-  input/
-  runs/
+```bash
+ampav_aws_transcribe -h
 ```
 
-### Tests
+```bash
+ampav_aws_transcribe s3://my-bucket/input/audio.wav \
+  --output-bucket my-bucket \
+  --output-key output/audio.json \
+  --region us-east-2
+```
+
+For local files:
+
+```bash
+ampav_aws_transcribe tests/fixtures/OpenDoor.wav \
+  --output-bucket my-bucket \
+  --input-prefix aws_transcribe/input \
+  --output-prefix aws_transcribe/output \
+  --region us-east-2
+```
+
+Do not put AWS secret keys on the command line. Use boto3-native auth:
+
+- AWS profile via `--profile`
+- AWS region via `--region`
+- environment variables
+- `~/.aws/config` and `~/.aws/credentials`
+- IAM role credentials where available
+
+Cleanup flags are explicit and off by default:
+
+- `--delete-job`
+- `--delete-input`
+- `--delete-output`
+
+## Examples
+
+Config loading and local artifact persistence are client concerns, not library
+defaults. See `examples/` for patterns:
+
+- `aws_transcribe_from_s3.py`: transcribe existing `s3://` media.
+- `aws_transcribe_local_file.py`: upload a local file, then transcribe it.
+- `aws_transcribe_with_yaml_config.py`: keep structured config in client code.
+- `aws_transcribe_save_artifacts.py`: persist selected run artifacts outside the library.
+- `aws_transcribe_config.example.yaml`: sample config for the YAML example.
+
+Keep real credentials, local configs, and generated outputs outside git.
+
+## Tests
 
 Routine tests are offline and deterministic:
 
 ```bash
-AMPAV/.venv/bin/python -m unittest discover -s tests
-```
-
-An optional live AWS smoke test uses `tests/fixtures/OpenDoor.wav` and is skipped by
-default. Run it only when you intentionally want to submit one AWS Transcribe
-job:
-
-```bash
-AMPAV_AWS_TRANSCRIBE_LIVE_TEST=1 \
-AMPAV_AWS_TRANSCRIBE_CONFIG=/path/to/aws_config.yaml \
 /home/yingfeng/AMPAV/.venv/bin/python -m unittest discover -s tests
 ```
 
-The live test validates the current AWS transcript contract before converting
-the raw AWS JSON into AMPAV schema.
+An optional live AWS smoke test is skipped by default:
+
+```bash
+AMPAV_AWS_TRANSCRIBE_LIVE_TEST=1 \
+AMPAV_AWS_TRANSCRIBE_CONFIG=/path/to/aws_transcribe_config.yaml \
+/home/yingfeng/AMPAV/.venv/bin/python -m unittest discover -s tests
+```
