@@ -263,90 +263,6 @@ class AwsTranscribe:
         )
         return output
 
-    def transcribe_uri(
-        self,
-        media_uri: str,
-        *,
-        output_bucket: str,
-        output_key: str | None = None,
-        output_prefix: str = "aws_transcribe/output",
-        job_name: str | None = None,
-        job_name_prefix: str = "ampav-aws-transcribe",
-        transcription: TranscriptionSettings | None = None,
-        polling: PollingSettings | None = None,
-        delete_job: bool = False,
-        delete_output: bool = False,
-    ) -> ToolOutput:
-        """Submit, wait for, and fetch a transcription for existing S3 media."""
-        job = self.submit(
-            media_uri,
-            output_bucket=output_bucket,
-            output_key=output_key,
-            output_prefix=output_prefix,
-            job_name=job_name,
-            job_name_prefix=job_name_prefix,
-            transcription=transcription,
-        )
-        final_job, history = self.wait(job, polling=polling)
-        output = self.get_transcription(job, final_job=final_job, status_history=history)
-        self.cleanup(job, delete_job=delete_job, delete_output=delete_output)
-        return output
-
-    def transcribe_file(
-        self,
-        audiofile: Path | str,
-        *,
-        output_bucket: str,
-        input_bucket: str | None = None,
-        input_key: str | None = None,
-        input_prefix: str = "aws_transcribe/input",
-        output_key: str | None = None,
-        output_prefix: str = "aws_transcribe/output",
-        job_name: str | None = None,
-        job_name_prefix: str = "ampav-aws-transcribe",
-        transcription: TranscriptionSettings | None = None,
-        polling: PollingSettings | None = None,
-        delete_job: bool = False,
-        delete_input: bool = False,
-        delete_output: bool = False,
-    ) -> ToolOutput:
-        """Transcribe local media or an `s3://` media URI and return AMPAV output.
-
-        Local paths are uploaded before submission. String values beginning with
-        `s3://` are treated as already-uploaded media and are not uploaded.
-        Cleanup flags are explicit and disabled by default.
-        """
-        if isinstance(audiofile, str) and audiofile.startswith("s3://"):
-            return self.transcribe_uri(
-                audiofile,
-                output_bucket=output_bucket,
-                output_key=output_key,
-                output_prefix=output_prefix,
-                job_name=job_name,
-                job_name_prefix=job_name_prefix,
-                transcription=transcription,
-                polling=polling,
-                delete_job=delete_job,
-                delete_output=delete_output,
-            )
-
-        job = self.submit_file(
-            audiofile,
-            output_bucket=output_bucket,
-            input_bucket=input_bucket,
-            input_key=input_key,
-            input_prefix=input_prefix,
-            output_key=output_key,
-            output_prefix=output_prefix,
-            job_name=job_name,
-            job_name_prefix=job_name_prefix,
-            transcription=transcription,
-        )
-        final_job, history = self.wait(job, polling=polling)
-        output = self.get_transcription(job, final_job=final_job, status_history=history)
-        self.cleanup(job, delete_job=delete_job, delete_input=delete_input, delete_output=delete_output)
-        return output
-
     def cleanup(
         self,
         job: AwsTranscribeJob,
@@ -374,26 +290,98 @@ def transcribe_file(
     audiofile: Path | str,
     *,
     output_bucket: str,
+    input_bucket: str | None = None,
+    input_key: str | None = None,
+    input_prefix: str = "aws_transcribe/input",
+    output_key: str | None = None,
+    output_prefix: str = "aws_transcribe/output",
+    job_name: str | None = None,
+    job_name_prefix: str = "ampav-aws-transcribe",
+    transcription: TranscriptionSettings | None = None,
+    polling: PollingSettings | None = None,
+    delete_job: bool = False,
+    delete_input: bool = False,
+    delete_output: bool = False,
     region_name: str | None = None,
     profile_name: str | None = None,
-    **kwargs: Any,
+    session: Any | None = None,
+    client: AwsTranscribe | None = None,
 ) -> ToolOutput:
-    """Convenience API for transcribing a local path or `s3://` media URI."""
-    client = AwsTranscribe(region_name=region_name, profile_name=profile_name)
-    return client.transcribe_file(audiofile, output_bucket=output_bucket, **kwargs)
+    """Transcribe local media or an `s3://` media URI and return AMPAV output.
+
+    Local paths are uploaded before submission. String values beginning with
+    `s3://` are treated as already-uploaded media and are not uploaded.
+    Cleanup flags are explicit and disabled by default.
+    """
+    if isinstance(audiofile, str) and audiofile.startswith("s3://"):
+        return transcribe_uri(
+            audiofile,
+            output_bucket=output_bucket,
+            output_key=output_key,
+            output_prefix=output_prefix,
+            job_name=job_name,
+            job_name_prefix=job_name_prefix,
+            transcription=transcription,
+            polling=polling,
+            delete_job=delete_job,
+            delete_output=delete_output,
+            region_name=region_name,
+            profile_name=profile_name,
+            session=session,
+            client=client,
+        )
+
+    aws = client or AwsTranscribe(region_name=region_name, profile_name=profile_name, session=session)
+    job = aws.submit_file(
+        audiofile,
+        output_bucket=output_bucket,
+        input_bucket=input_bucket,
+        input_key=input_key,
+        input_prefix=input_prefix,
+        output_key=output_key,
+        output_prefix=output_prefix,
+        job_name=job_name,
+        job_name_prefix=job_name_prefix,
+        transcription=transcription,
+    )
+    final_job, history = aws.wait(job, polling=polling)
+    output = aws.get_transcription(job, final_job=final_job, status_history=history)
+    aws.cleanup(job, delete_job=delete_job, delete_input=delete_input, delete_output=delete_output)
+    return output
 
 
 def transcribe_uri(
     media_uri: str,
     *,
     output_bucket: str,
+    output_key: str | None = None,
+    output_prefix: str = "aws_transcribe/output",
+    job_name: str | None = None,
+    job_name_prefix: str = "ampav-aws-transcribe",
+    transcription: TranscriptionSettings | None = None,
+    polling: PollingSettings | None = None,
+    delete_job: bool = False,
+    delete_output: bool = False,
     region_name: str | None = None,
     profile_name: str | None = None,
-    **kwargs: Any,
+    session: Any | None = None,
+    client: AwsTranscribe | None = None,
 ) -> ToolOutput:
-    """Convenience API for transcribing media that already exists in S3."""
-    client = AwsTranscribe(region_name=region_name, profile_name=profile_name)
-    return client.transcribe_uri(media_uri, output_bucket=output_bucket, **kwargs)
+    """Submit, wait for, and fetch a transcription for existing S3 media."""
+    aws = client or AwsTranscribe(region_name=region_name, profile_name=profile_name, session=session)
+    job = aws.submit(
+        media_uri,
+        output_bucket=output_bucket,
+        output_key=output_key,
+        output_prefix=output_prefix,
+        job_name=job_name,
+        job_name_prefix=job_name_prefix,
+        transcription=transcription,
+    )
+    final_job, history = aws.wait(job, polling=polling)
+    output = aws.get_transcription(job, final_job=final_job, status_history=history)
+    aws.cleanup(job, delete_job=delete_job, delete_output=delete_output)
+    return output
 
 
 def build_start_job_request(
@@ -518,10 +506,8 @@ def cli_aws_transcribe() -> None:
         max_speaker_labels=args.max_speaker_labels,
     )
     polling = PollingSettings(interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
-    client = AwsTranscribe(region_name=args.region, profile_name=args.profile)
-
     try:
-        result = client.transcribe_file(
+        result = transcribe_file(
             args.media,
             output_bucket=args.output_bucket,
             input_bucket=args.input_bucket,
@@ -536,6 +522,8 @@ def cli_aws_transcribe() -> None:
             delete_job=args.delete_job,
             delete_input=args.delete_input,
             delete_output=args.delete_output,
+            region_name=args.region,
+            profile_name=args.profile,
         )
     except Exception as exc:
         if not is_cli_error(exc):

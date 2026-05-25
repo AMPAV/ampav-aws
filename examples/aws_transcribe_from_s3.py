@@ -6,7 +6,7 @@ to submit the AWS Transcribe job and read the resulting AMPAV ToolOutput.
 
 from argparse import ArgumentParser
 
-from ampav.aws.transcribe import AwsTranscribe, PollingSettings, TranscriptionSettings
+from ampav.aws.transcribe import PollingSettings, TranscriptionSettings, transcribe_uri
 
 
 def main() -> None:
@@ -19,13 +19,14 @@ def main() -> None:
     parser.add_argument("--region")
     args = parser.parse_args()
 
-    client = AwsTranscribe(profile_name=args.profile, region_name=args.region)
-    result = client.transcribe_uri(
+    result = transcribe_uri(
         args.media_uri,
         output_bucket=args.output_bucket,
         output_key=args.output_key,
         transcription=TranscriptionSettings(),
         polling=PollingSettings(),
+        profile_name=args.profile,
+        region_name=args.region,
     )
     print(result.model_dump_yaml(sort_keys=False))
 
