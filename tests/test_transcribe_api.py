@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings, build_cli_parser
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings, build_cli_parser, transcribe_uri
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "aws_transcript_opendoor.json"
@@ -119,12 +119,13 @@ class AwsTranscribeApiTest(unittest.TestCase):
     def test_transcribe_uri_returns_tool_output_with_private_raw_data(self) -> None:
         client, _, _ = self.make_client()
 
-        output = client.transcribe_uri(
+        output = transcribe_uri(
             "s3://input/audio.wav",
             output_bucket="out",
             output_key="result.json",
             job_name="test-job",
             transcription=TranscriptionSettings(media_format="wav"),
+            client=client,
         )
 
         self.assertEqual(output.output.text, "Please open the door.")
