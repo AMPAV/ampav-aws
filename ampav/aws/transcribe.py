@@ -10,12 +10,13 @@ import time
 from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ampav.core.logging import LOG_FORMAT
 from ampav.core.schema import ToolOutput
 
-from .errors import AwsTranscribeError, AwsTranscriptSchemaError, is_aws_sdk_error
+from .errors import AwsTranscribeError, AwsTranscriptSchemaError
 from .s3 import S3Location, join_s3_key, parse_s3_uri
 from .transcribe_contract import validate_aws_transcript_contract
 from .transcribe_conversion import aws_transcript_to_transcript
@@ -123,7 +124,7 @@ class AwsTranscribe:
         )
 
         logging.info("Starting AWS Transcribe job %s", job_name)
-        logging.debug("AWS Transcribe request: %s", json_for_log(request))
+        logging.debug("AWS Transcribe request: %s", json.dumps(request, default=str, sort_keys=True))
         self.transcribe_client.start_transcription_job(**request)
         return AwsTranscribeJob(
             name=job_name,
@@ -451,16 +452,8 @@ def tool_parameters(job: AwsTranscribeJob, job_data: dict[str, Any]) -> dict[str
     return {key: value for key, value in parameters.items() if value is not None}
 
 
-def json_for_log(data: Any) -> str:
-    return json.dumps(data, default=str, sort_keys=True)
-
-
 def json_safe(data: Any) -> Any:
     return json.loads(json.dumps(data, default=str))
-
-
-def configure_logging(debug: bool = False) -> None:
-    logging.basicConfig(format=LOG_FORMAT, level=logging.DEBUG if debug else logging.INFO)
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -495,7 +488,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
 def cli_aws_transcribe() -> None:
     """Console entry point for `ampav_aws_transcribe`."""
     args = build_cli_parser().parse_args()
-    configure_logging(args.debug)
+    logging.basicConfig(format=LOG_FORMAT, level=logging.DEBUG if args.debug else logging.INFO)
 
     transcription = TranscriptionSettings(
         media_format=args.media_format,
@@ -526,16 +519,13 @@ def cli_aws_transcribe() -> None:
             profile_name=args.profile,
         )
     except Exception as exc:
-        if not is_cli_error(exc):
+        cli_errors = (AwsTranscribeError, BotoCoreError, ClientError, OSError, RuntimeError, TimeoutError, ValueError)
+        if not isinstance(exc, cli_errors):
             raise
         logging.error("%s", exc)
         raise SystemExit(1) from exc
 
     print(result.model_dump_yaml(sort_keys=False))
-
-
-def is_cli_error(exc: BaseException) -> bool:
-    return isinstance(exc, (AwsTranscribeError, OSError, RuntimeError, TimeoutError, ValueError)) or is_aws_sdk_error(exc)
 
 
 if __name__ == "__main__":
