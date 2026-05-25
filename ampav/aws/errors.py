@@ -1,7 +1,5 @@
 """AWS provider errors."""
 
-from botocore.exceptions import BotoCoreError, ClientError
-
 
 class AwsTranscribeError(Exception):
     """Raised when the AWS Transcribe workflow fails."""
@@ -18,8 +16,3 @@ class AwsTranscriptSchemaError(AwsTranscribeError):
     def __init__(self, path: str, message: str):
         self.path = path
         super().__init__(None, f"{path}: {message}")
-
-
-def is_aws_sdk_error(exc: BaseException) -> bool:
-    """Return true when an exception came from botocore/boto3."""
-    return isinstance(exc, (BotoCoreError, ClientError))
