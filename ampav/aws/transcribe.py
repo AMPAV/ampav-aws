@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import logging
+from os import PathLike
 from pathlib import Path
 import re
 import time
@@ -135,7 +136,7 @@ class AwsTranscribe:
 
     def submit_file(
         self,
-        audiofile: Path | str,
+        audiofile: str | PathLike[str],
         *,
         output_bucket: str,
         input_bucket: str | None = None,
@@ -288,7 +289,7 @@ class AwsTranscribe:
 
 
 def transcribe_file(
-    audiofile: Path | str,
+    audiofile: str | PathLike[str],
     *,
     output_bucket: str,
     input_bucket: str | None = None,
@@ -308,30 +309,12 @@ def transcribe_file(
     session: Any | None = None,
     client: AwsTranscribe | None = None,
 ) -> ToolOutput:
-    """Transcribe local media or an `s3://` media URI and return AMPAV output.
+    """Upload local media, transcribe it, and return AMPAV output.
 
-    Local paths are uploaded before submission. String values beginning with
-    `s3://` are treated as already-uploaded media and are not uploaded.
-    Cleanup flags are explicit and disabled by default.
+    Local paths are uploaded before submission. Use `transcribe_uri` for media
+    that already exists in S3. Cleanup flags are explicit and disabled by
+    default.
     """
-    if isinstance(audiofile, str) and audiofile.startswith("s3://"):
-        return transcribe_uri(
-            audiofile,
-            output_bucket=output_bucket,
-            output_key=output_key,
-            output_prefix=output_prefix,
-            job_name=job_name,
-            job_name_prefix=job_name_prefix,
-            transcription=transcription,
-            polling=polling,
-            delete_job=delete_job,
-            delete_output=delete_output,
-            region_name=region_name,
-            profile_name=profile_name,
-            session=session,
-            client=client,
-        )
-
     aws = client or AwsTranscribe(region_name=region_name, profile_name=profile_name, session=session)
     job = aws.submit_file(
         audiofile,
@@ -479,7 +462,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval", type=int, default=30, help="Seconds between job status checks")
     parser.add_argument("--timeout", type=int, default=7200, help="Maximum seconds to wait for completion")
     parser.add_argument("--delete-job", action="store_true", help="Delete AWS Transcribe job after fetching output")
-    parser.add_argument("--delete-input", action="store_true", help="Delete input S3 object after fetching output")
+    parser.add_argument("--delete-input", action="store_true", help="Delete uploaded input S3 object after fetching output")
     parser.add_argument("--delete-output", action="store_true", help="Delete output S3 object after fetching output")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     return parser
@@ -500,24 +483,40 @@ def cli_aws_transcribe() -> None:
     )
     polling = PollingSettings(interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
     try:
-        result = transcribe_file(
-            args.media,
-            output_bucket=args.output_bucket,
-            input_bucket=args.input_bucket,
-            input_key=args.input_key,
-            input_prefix=args.input_prefix,
-            output_key=args.output_key,
-            output_prefix=args.output_prefix,
-            job_name=args.job_name,
-            job_name_prefix=args.job_name_prefix,
-            transcription=transcription,
-            polling=polling,
-            delete_job=args.delete_job,
-            delete_input=args.delete_input,
-            delete_output=args.delete_output,
-            region_name=args.region,
-            profile_name=args.profile,
-        )
+        if args.media.startswith("s3://"):
+            result = transcribe_uri(
+                args.media,
+                output_bucket=args.output_bucket,
+                output_key=args.output_key,
+                output_prefix=args.output_prefix,
+                job_name=args.job_name,
+                job_name_prefix=args.job_name_prefix,
+                transcription=transcription,
+                polling=polling,
+                delete_job=args.delete_job,
+                delete_output=args.delete_output,
+                region_name=args.region,
+                profile_name=args.profile,
+            )
+        else:
+            result = transcribe_file(
+                args.media,
+                output_bucket=args.output_bucket,
+                input_bucket=args.input_bucket,
+                input_key=args.input_key,
+                input_prefix=args.input_prefix,
+                output_key=args.output_key,
+                output_prefix=args.output_prefix,
+                job_name=args.job_name,
+                job_name_prefix=args.job_name_prefix,
+                transcription=transcription,
+                polling=polling,
+                delete_job=args.delete_job,
+                delete_input=args.delete_input,
+                delete_output=args.delete_output,
+                region_name=args.region,
+                profile_name=args.profile,
+            )
     except Exception as exc:
         cli_errors = (AwsTranscribeError, BotoCoreError, ClientError, OSError, RuntimeError, TimeoutError, ValueError)
         if not isinstance(exc, cli_errors):
