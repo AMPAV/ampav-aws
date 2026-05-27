@@ -95,6 +95,18 @@ class AwsTranscribeApiTest(unittest.TestCase):
         self.assertEqual(s3.uploads, [])
         self.assertEqual(transcribe.started[0]["Media"]["MediaFileUri"], "s3://input/audio.wav")
 
+    def test_submit_rejects_non_s3_uri(self) -> None:
+        client, transcribe, _ = self.make_client()
+
+        with self.assertRaises(ValueError):
+            client.submit(
+                "https://example.com/audio.wav",
+                output_bucket="out",
+                transcription=TranscriptionSettings(media_format="wav"),
+            )
+
+        self.assertEqual(transcribe.started, [])
+
     def test_submit_file_uploads_then_submits(self) -> None:
         client, transcribe, s3 = self.make_client()
         with tempfile.TemporaryDirectory() as tmpdir:

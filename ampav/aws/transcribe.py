@@ -112,6 +112,7 @@ class AwsTranscribe:
         The returned `AwsTranscribeJob` is the public handle callers can store,
         poll, fetch, or clean up later.
         """
+        parse_s3_uri(media_uri)
         transcription = transcription or TranscriptionSettings()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         job_name = job_name or build_job_name(media_uri, job_name_prefix, timestamp)
