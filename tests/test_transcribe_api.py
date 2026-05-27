@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings, build_cli_parser, transcribe_uri
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings, build_cli_parser, transcribe_file, transcribe_uri
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "aws_transcript_opendoor.json"
@@ -132,6 +132,25 @@ class AwsTranscribeApiTest(unittest.TestCase):
         self.assertEqual(output.parameters["content_source"], "s3://input/audio.wav")
         self.assertIn("raw_transcript", output.tool_private)
         self.assertEqual(output.tool_private["aws_transcribe_job"]["name"], "test-job")
+
+    def test_transcribe_file_accepts_local_path_string(self) -> None:
+        client, _, s3 = self.make_client()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio = Path(tmpdir) / "sample.wav"
+            audio.write_bytes(b"test")
+
+            output = transcribe_file(
+                str(audio),
+                output_bucket="out",
+                output_key="result.json",
+                job_name="test-job",
+                transcription=TranscriptionSettings(media_format="wav"),
+                client=client,
+            )
+
+        self.assertEqual(output.output.text, "Please open the door.")
+        self.assertEqual(output.parameters["media_was_uploaded"], True)
+        self.assertEqual(s3.uploads[0][1], "out")
 
     def test_cleanup_is_explicit(self) -> None:
         client, transcribe, s3 = self.make_client()
