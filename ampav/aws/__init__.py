@@ -1,11 +1,10 @@
 """AWS tooling for AMPAV."""
 
-from .transcribe import AwsTranscribe, AwsTranscribeJob, AwsTranscribeStatus, PollingSettings, TranscriptionSettings
+from .transcribe import AwsTranscribe, AwsTranscribeJob, AwsTranscribeStatus, TranscriptionSettings
 
 __all__ = [
     "AwsTranscribe",
     "AwsTranscribeJob",
     "AwsTranscribeStatus",
-    "PollingSettings",
     "TranscriptionSettings",
 ]

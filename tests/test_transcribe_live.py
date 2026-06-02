@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from ampav.aws.transcribe import AwsTranscribe, PollingSettings, TranscriptionSettings
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 from ampav.aws.transcribe_contract import validate_aws_transcript_contract
 
 
@@ -29,7 +29,12 @@ class AwsTranscribeLiveTest(unittest.TestCase):
         output_bucket = s3_config.get("output_bucket") or s3_config.get("bucket")
         self.assertIsNotNone(output_bucket)
 
-        client = AwsTranscribe(region_name=aws_config.get("region"), profile_name=aws_config.get("profile_name"))
+        client = AwsTranscribe(
+            region_name=aws_config.get("region"),
+            profile_name=aws_config.get("profile_name"),
+            polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
+            timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
+        )
         output = client.process(
             SAMPLE_AUDIO,
             output_bucket=output_bucket,
@@ -38,7 +43,6 @@ class AwsTranscribeLiveTest(unittest.TestCase):
             output_prefix=s3_config.get("output_prefix", "aws_transcribe/output"),
             job_name_prefix=transcription_config.pop("job_name_prefix", "ampav-aws-transcribe"),
             transcription=TranscriptionSettings(**transcription_config),
-            polling=PollingSettings(**polling_config),
         )
 
         validate_aws_transcript_contract(output.tool_private["raw_transcript"])

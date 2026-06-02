@@ -6,7 +6,7 @@ to submit the AWS Transcribe job and read the resulting AMPAV ToolOutput.
 
 from argparse import ArgumentParser
 
-from ampav.aws.transcribe import AwsTranscribe, PollingSettings, TranscriptionSettings
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 
 
 def main() -> None:
@@ -25,7 +25,6 @@ def main() -> None:
         output_bucket=args.output_bucket,
         output_key=args.output_key,
         transcription=TranscriptionSettings(),
-        polling=PollingSettings(),
     )
     print(result.model_dump_yaml(sort_keys=False))
 

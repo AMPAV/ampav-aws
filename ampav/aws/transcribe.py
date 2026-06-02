@@ -30,13 +30,6 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class PollingSettings(StrictModel):
-    """Polling controls for waiting on an AWS Transcribe batch job."""
-
-    interval_seconds: int = Field(default=30, ge=1)
-    timeout_seconds: int | None = Field(default=7200, ge=1)
-
-
 class TranscriptionSettings(StrictModel):
     """AWS Transcribe job settings supported by AMPAV."""
 
@@ -85,6 +78,9 @@ class AwsTranscribeStatus(AsyncJobStatus):
 class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
     """Low-level AWS Transcribe client used by the AMPAV API and CLI."""
 
+    polling_interval: float = 30
+    timeout: float | None = 7200
+
     def __init__(
         self,
         *,
@@ -93,6 +89,9 @@ class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
         session: Any | None = None,
         transcribe_client: Any | None = None,
         s3_client: Any | None = None,
+        polling_interval: float = 30,
+        timeout: float | None = 7200,
+        cleanup_policy: CleanupPolicy | None = None,
     ):
         """Create an AWS Transcribe client from boto3 session settings or injected clients.
 
@@ -100,10 +99,19 @@ class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
         constructor. Tests and higher-level callers may pass already-created
         clients to avoid owning credential/session setup here.
         """
+        if polling_interval <= 0:
+            raise ValueError("polling_interval must be greater than 0")
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be greater than 0 when set")
+
         if session is None and (transcribe_client is None or s3_client is None):
             session = boto3.Session(region_name=region_name, profile_name=profile_name)
         self.transcribe_client = transcribe_client or session.client("transcribe")
         self.s3_client = s3_client or session.client("s3")
+        self.polling_interval = polling_interval
+        self.timeout = timeout
+        if cleanup_policy is not None:
+            self.cleanup_policy = cleanup_policy
 
     def submit(
         self,
@@ -264,11 +272,9 @@ class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
         job_name: str | None = None,
         job_name_prefix: str = "ampav-aws-transcribe",
         transcription: TranscriptionSettings | None = None,
-        polling: PollingSettings | None = None,
         cleanup_policy: CleanupPolicy | None = None,
     ) -> ToolOutput:
         """Transcribe local or S3 media and return AMPAV output."""
-        polling = polling or PollingSettings()
         cleanup_policy = cleanup_policy or self.cleanup_policy
         media_uri = str(media)
         media_was_uploaded = False
@@ -304,10 +310,10 @@ class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
         status = self.get_status(job)
         while not status.is_done:
             logging.info("AWS Transcribe job %s status: %s", job.name, status.aws_status)
-            if polling.timeout_seconds is not None and time.monotonic() - started > polling.timeout_seconds:
+            if self.timeout is not None and time.monotonic() - started > self.timeout:
                 self.cleanup(job, cleanup_policy)
                 raise AwsTranscribeError(job.name, "did not finish within timeout")
-            time.sleep(polling.interval_seconds)
+            time.sleep(self.polling_interval)
             status = self.get_status(job)
 
         logging.info("AWS Transcribe job %s status: %s", job.name, status.aws_status)
@@ -454,13 +460,17 @@ def cli_aws_transcribe() -> None:
         show_speaker_labels=not args.no_speaker_labels,
         max_speaker_labels=args.max_speaker_labels,
     )
-    polling = PollingSettings(interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
     cleanup_policy = CleanupPolicy(
         delete_job=args.delete_job,
         delete_input=args.delete_input,
         delete_output=args.delete_output,
     )
-    aws = AwsTranscribe(region_name=args.region, profile_name=args.profile)
+    aws = AwsTranscribe(
+        region_name=args.region,
+        profile_name=args.profile,
+        polling_interval=args.poll_interval,
+        timeout=args.timeout,
+    )
     try:
         result = aws.process(
             args.media,
@@ -473,7 +483,6 @@ def cli_aws_transcribe() -> None:
             job_name=args.job_name,
             job_name_prefix=args.job_name_prefix,
             transcription=transcription,
-            polling=polling,
             cleanup_policy=cleanup_policy,
         )
     except Exception as exc:

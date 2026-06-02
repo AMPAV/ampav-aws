@@ -8,7 +8,7 @@ variables, or instance role credentials.
 from argparse import ArgumentParser
 from pathlib import Path
 
-from ampav.aws.transcribe import AwsTranscribe, PollingSettings, TranscriptionSettings
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 
 
 def main() -> None:
@@ -27,7 +27,6 @@ def main() -> None:
         output_bucket=args.output_bucket,
         input_bucket=args.input_bucket,
         transcription=TranscriptionSettings(),
-        polling=PollingSettings(),
     )
     print(result.model_dump_yaml(sort_keys=False))
 
