@@ -1,7 +1,9 @@
 """AWS provider errors."""
 
+from ampav.core.async_tool import ToolError
 
-class AwsTranscribeError(Exception):
+
+class AwsTranscribeError(ToolError):
     """Raised when the AWS Transcribe workflow fails."""
 
     def __init__(self, job_name: str | None, message: str):

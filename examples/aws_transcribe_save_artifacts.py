@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from time import time
 
-from ampav.aws.transcribe import transcribe_file
+from ampav.aws.transcribe import AwsTranscribe
 
 
 def main() -> None:
@@ -26,11 +26,10 @@ def main() -> None:
     run_dir = args.run_dir / str(int(time()))
     run_dir.mkdir(parents=True, exist_ok=False)
 
-    result = transcribe_file(
+    client = AwsTranscribe(profile_name=args.profile, region_name=args.region)
+    result = client.process(
         args.media,
         output_bucket=args.output_bucket,
-        profile_name=args.profile,
-        region_name=args.region,
     )
 
     (run_dir / "tool_output.yaml").write_text(result.model_dump_yaml(sort_keys=False))

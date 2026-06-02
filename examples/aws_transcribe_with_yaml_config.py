@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from ampav.aws.transcribe import PollingSettings, TranscriptionSettings, transcribe_file
+from ampav.aws.transcribe import AwsTranscribe, PollingSettings, TranscriptionSettings
 
 
 def main() -> None:
@@ -27,7 +27,8 @@ def main() -> None:
     transcription_config = config.get("transcription", {})
     polling_config = config.get("polling", {})
 
-    result = transcribe_file(
+    client = AwsTranscribe(region_name=aws_config.get("region"), profile_name=aws_config.get("profile_name"))
+    result = client.process(
         args.media,
         output_bucket=s3_config["output_bucket"],
         input_bucket=s3_config.get("input_bucket"),
@@ -36,8 +37,6 @@ def main() -> None:
         job_name_prefix=transcription_config.pop("job_name_prefix", "ampav-aws-transcribe"),
         transcription=TranscriptionSettings(**transcription_config),
         polling=PollingSettings(**polling_config),
-        region_name=aws_config.get("region"),
-        profile_name=aws_config.get("profile_name"),
     )
     print(result.model_dump_yaml(sort_keys=False))
 
