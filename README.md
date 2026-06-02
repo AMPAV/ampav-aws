@@ -16,15 +16,14 @@ transcript, and optionally clean up AWS-side resources. It supports both existin
 Use an existing S3 media object:
 
 ```python
-from ampav.aws.transcribe import TranscriptionSettings, transcribe_uri
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 
-result = transcribe_uri(
+client = AwsTranscribe(region_name="us-east-2", profile_name="my-profile")
+result = client.process(
     "s3://my-bucket/input/audio.wav",
     output_bucket="my-bucket",
     output_key="output/audio.json",
     transcription=TranscriptionSettings(language_code="en-US"),
-    region_name="us-east-2",
-    profile_name="my-profile",
 )
 
 print(result.output.text)
@@ -35,20 +34,23 @@ Use a local file:
 ```python
 from pathlib import Path
 
-from ampav.aws.transcribe import transcribe_file
+from ampav.aws.transcribe import AwsTranscribe
 
-result = transcribe_file(
+client = AwsTranscribe(region_name="us-east-2")
+result = client.process(
     Path("tests/fixtures/OpenDoor.wav"),
     output_bucket="my-bucket",
     input_prefix="aws_transcribe/input",
     output_prefix="aws_transcribe/output",
-    region_name="us-east-2",
 )
 ```
 
 For lower-level job lifecycle control, use `AwsTranscribe` directly and call
-`submit()`, `submit_file()`, `wait()`, `get_transcription()`, and `cleanup()`.
-`submit()` returns an `AwsTranscribeJob` with the AWS job name and S3 locations.
+`submit()`, `get_status()`, `get_job()`, `get_external_result()`,
+`to_tool_output()`, and `cleanup()`. `submit()` accepts media that already
+exists in S3 and returns an `AwsTranscribeJob` with the AWS job name and S3
+locations. `process()` is the high-level path for either local files or S3
+media.
 
 `ToolOutput.tool_private` contains raw AWS job/transcript data for
 troubleshooting. Normal client code should use `ToolOutput.output`.

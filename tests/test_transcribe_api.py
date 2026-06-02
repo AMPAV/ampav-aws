@@ -1,10 +1,11 @@
-import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings, build_cli_parser, transcribe_file, transcribe_uri
+from ampav.core.async_tool import AsyncStatusCode, CleanupPolicy
+
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings, build_cli_parser
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "aws_transcript_opendoor.json"
@@ -95,37 +96,59 @@ class AwsTranscribeApiTest(unittest.TestCase):
         self.assertEqual(s3.uploads, [])
         self.assertEqual(transcribe.started[0]["Media"]["MediaFileUri"], "s3://input/audio.wav")
 
-    def test_submit_file_uploads_then_submits(self) -> None:
-        client, transcribe, s3 = self.make_client()
+    def test_submit_rejects_non_s3_uri(self) -> None:
+        client, transcribe, _ = self.make_client()
+
+        with self.assertRaises(ValueError):
+            client.submit(
+                "https://example.com/audio.wav",
+                output_bucket="out",
+                transcription=TranscriptionSettings(media_format="wav"),
+            )
+
+        self.assertEqual(transcribe.started, [])
+
+    def test_upload_media_uploads_local_file(self) -> None:
+        client, _, s3 = self.make_client()
         with tempfile.TemporaryDirectory() as tmpdir:
             audio = Path(tmpdir) / "sample.wav"
             audio.write_bytes(b"test")
 
-            job = client.submit_file(
+            location = client.upload_media(
                 audio,
-                output_bucket="out",
-                input_bucket="in",
-                input_key="input/sample.wav",
-                output_key="output/sample.json",
+                bucket="in",
+                key="input/sample.wav",
                 job_name="sample-job",
-                transcription=TranscriptionSettings(media_format="wav"),
             )
 
-        self.assertTrue(job.media_was_uploaded)
-        self.assertEqual(job.media_uri, "s3://in/input/sample.wav")
+        self.assertEqual(location.uri, "s3://in/input/sample.wav")
         self.assertEqual(s3.uploads[0][1:], ("in", "input/sample.wav"))
-        self.assertEqual(transcribe.started[0]["Media"]["MediaFileUri"], "s3://in/input/sample.wav")
 
-    def test_transcribe_uri_returns_tool_output_with_private_raw_data(self) -> None:
+    def test_get_status_maps_completed_job(self) -> None:
         client, _, _ = self.make_client()
-
-        output = transcribe_uri(
+        job = client.submit(
             "s3://input/audio.wav",
             output_bucket="out",
             output_key="result.json",
             job_name="test-job",
             transcription=TranscriptionSettings(media_format="wav"),
-            client=client,
+        )
+
+        status = client.get_status(job)
+
+        self.assertEqual(status.status, AsyncStatusCode.SUCCEEDED)
+        self.assertEqual(status.aws_status, "COMPLETED")
+        self.assertEqual(status.job_id, "test-job")
+
+    def test_process_s3_uri_returns_tool_output_with_private_raw_data(self) -> None:
+        client, _, _ = self.make_client()
+
+        output = client.process(
+            "s3://input/audio.wav",
+            output_bucket="out",
+            output_key="result.json",
+            job_name="test-job",
+            transcription=TranscriptionSettings(media_format="wav"),
         )
 
         self.assertEqual(output.output.text, "Please open the door.")
@@ -133,19 +156,18 @@ class AwsTranscribeApiTest(unittest.TestCase):
         self.assertIn("raw_transcript", output.tool_private)
         self.assertEqual(output.tool_private["aws_transcribe_job"]["name"], "test-job")
 
-    def test_transcribe_file_accepts_local_path_string(self) -> None:
+    def test_process_accepts_local_path_string(self) -> None:
         client, _, s3 = self.make_client()
         with tempfile.TemporaryDirectory() as tmpdir:
             audio = Path(tmpdir) / "sample.wav"
             audio.write_bytes(b"test")
 
-            output = transcribe_file(
+            output = client.process(
                 str(audio),
                 output_bucket="out",
                 output_key="result.json",
                 job_name="test-job",
                 transcription=TranscriptionSettings(media_format="wav"),
-                client=client,
             )
 
         self.assertEqual(output.output.text, "Please open the door.")
@@ -162,7 +184,7 @@ class AwsTranscribeApiTest(unittest.TestCase):
             transcription=TranscriptionSettings(media_format="wav"),
         )
 
-        client.cleanup(job, delete_job=True, delete_input=True, delete_output=True)
+        client.cleanup(job, CleanupPolicy(delete_job=True, delete_input=True, delete_output=True))
 
         self.assertEqual(transcribe.deleted, ["cleanup-job"])
         self.assertEqual(s3.deleted, [("out", "result.json"), ("input", "audio.wav")])

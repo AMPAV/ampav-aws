@@ -8,7 +8,7 @@ variables, or instance role credentials.
 from argparse import ArgumentParser
 from pathlib import Path
 
-from ampav.aws.transcribe import PollingSettings, TranscriptionSettings, transcribe_file
+from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 
 
 def main() -> None:
@@ -21,14 +21,12 @@ def main() -> None:
     parser.add_argument("--region")
     args = parser.parse_args()
 
-    result = transcribe_file(
+    client = AwsTranscribe(profile_name=args.profile, region_name=args.region)
+    result = client.process(
         args.audiofile,
         output_bucket=args.output_bucket,
         input_bucket=args.input_bucket,
         transcription=TranscriptionSettings(),
-        polling=PollingSettings(),
-        profile_name=args.profile,
-        region_name=args.region,
     )
     print(result.model_dump_yaml(sort_keys=False))
 

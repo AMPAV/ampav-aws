@@ -13,8 +13,8 @@ s3:
   output_prefix: aws_transcribe/output
 
 polling:
-  interval_seconds: 30
-  timeout_seconds: 7200
+  polling_interval: 30
+  timeout: 7200
 
 transcription:
   media_format: wav
