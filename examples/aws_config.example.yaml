@@ -1,4 +1,4 @@
-# Example application-owned config for examples/aws_transcribe_with_yaml_config.py.
+# Example application-owned config for AWS examples.
 # Secrets are intentionally omitted; boto3 resolves credentials from profiles,
 # environment variables, credential files, or role credentials.
 
@@ -7,10 +7,11 @@ aws:
   profile_name: YOUR_AWS_PROFILE
 
 s3:
-  output_bucket: YOUR_TRANSCRIBE_BUCKET
-  input_bucket: YOUR_TRANSCRIBE_BUCKET
+  bucket: YOUR_AWS_BUCKET
   input_prefix: aws_transcribe/input
-  output_prefix: aws_transcribe/output
+  output_s3_uri:
+  delete_output: false
+  keep_uploaded_input: false
 
 polling:
   polling_interval: 30
@@ -24,3 +25,11 @@ transcription:
   show_speaker_labels: true
   max_speaker_labels: 10
   job_name_prefix: ampav-aws-transcribe
+
+comprehend:
+  data_access_role_arn: YOUR_COMPREHEND_DATA_ACCESS_ROLE_ARN
+  input_prefix: aws_comprehend/input
+  output_prefix: aws_comprehend/output
+  language_code: en
+  input_format: ONE_DOC_PER_FILE
+  job_name_prefix: ampav-aws-comprehend

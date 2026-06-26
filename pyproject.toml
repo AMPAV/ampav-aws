@@ -1,6 +1,6 @@
 [project]
 name = "ampav-aws"
-version = "0.0.4"
+version = "0.0.5"
 description = "AWS tooling for the AMPAV environment"
 readme = "README.md"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ authors = [
 
 requires-python = ">=3.12"
 dependencies = [
-    "ampav-core>=0.0.15,<0.0.16",
+    "ampav-core>=0.0.16,<0.0.17",
 ]
 
 [project.urls]
@@ -23,7 +23,10 @@ Repository = "https://github.com/AMPAV/ampav-aws.git"
 Issues = "https://github.com/AMPAV/ampav-aws/issues"
 
 [project.scripts]
-ampav_aws_transcribe = "ampav.aws.transcribe:cli_aws_transcribe"
+ampav_aws_transcribe = "ampav_aws_cli.transcribe:main"
+
+[tool.setuptools.packages.find]
+include = ["ampav*", "ampav_aws_cli*", "ampav_aws_utils*"]
 
 [build-system]
 requires = ["setuptools"]

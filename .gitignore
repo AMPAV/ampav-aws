@@ -72,6 +72,7 @@ venv.bak/
 
 # Runtime data should live outside this repo under AMPAV/test_data/.
 # Ignore it if someone accidentally creates it inside the package repo.
+.work/
 test_data/
 test-data/
 aws_config.yaml

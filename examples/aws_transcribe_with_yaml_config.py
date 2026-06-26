@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
+from ampav_aws_utils.s3_files import delete_object, upload_file
 
 
 def main() -> None:
@@ -33,15 +34,32 @@ def main() -> None:
         polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
         timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
     )
-    result = client.process(
-        args.media,
-        output_bucket=s3_config["output_bucket"],
-        input_bucket=s3_config.get("input_bucket"),
-        input_prefix=s3_config.get("input_prefix", "aws_transcribe/input"),
-        output_prefix=s3_config.get("output_prefix", "aws_transcribe/output"),
-        job_name_prefix=transcription_config.pop("job_name_prefix", "ampav-aws-transcribe"),
-        transcription=TranscriptionSettings(**transcription_config),
-    )
+    media_uri = args.media
+    input_location = None
+    if not media_uri.startswith("s3://"):
+        input_bucket = s3_config.get("input_bucket") or s3_config.get("bucket")
+        if not input_bucket:
+            raise ValueError("s3.input_bucket or s3.bucket is required for local media")
+        input_location = upload_file(
+            client.s3_client,
+            media_uri,
+            bucket=input_bucket,
+            prefix=s3_config.get("input_prefix", "aws_transcribe/input"),
+            name_prefix=transcription_config.get("job_name_prefix", "ampav-aws-transcribe"),
+        )
+        media_uri = input_location.uri
+
+    try:
+        result = client.process(
+            media_uri,
+            output_s3_uri=s3_config.get("output_s3_uri"),
+            delete_output=bool(s3_config.get("delete_output", False)),
+            job_name_prefix=transcription_config.pop("job_name_prefix", "ampav-aws-transcribe"),
+            transcription=TranscriptionSettings(**transcription_config),
+        )
+    finally:
+        if input_location is not None and not s3_config.get("keep_uploaded_input", False):
+            delete_object(client.s3_client, input_location)
     print(result.model_dump_yaml(sort_keys=False))
 
 

@@ -1,13 +1,14 @@
 import os
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from ampav.core.async_tool import CleanupPolicy
-
 from ampav.aws.comprehend import AwsComprehend
+from ampav.aws.s3 import join_s3_key
+from ampav_aws_utils.s3_files import delete_object, upload_text
 
 
 SAMPLE_TEXT = (
@@ -41,26 +42,31 @@ class AwsComprehendLiveTest(unittest.TestCase):
             polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
             timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
         )
-        input_location = client.upload_text_input(
+        job_name_prefix = comprehend_config.get("job_name_prefix", "ampav-aws-comprehend-live")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        input_location = upload_text(
+            client.s3_client,
             SAMPLE_TEXT,
             bucket=bucket,
-            prefix=comprehend_config.get("input_prefix", "aws_comprehend/input"),
-            job_name_prefix=comprehend_config.get("job_name_prefix", "ampav-aws-comprehend-live"),
+            key=join_s3_key(comprehend_config.get("input_prefix", "aws_comprehend/input"), f"{job_name_prefix}-{timestamp}.txt"),
         )
         output_s3_uri = f"s3://{bucket}/{comprehend_config.get('output_prefix', 'aws_comprehend/output').strip('/')}"
-        job = client.submit(
-            input_location.uri,
-            output_s3_uri=output_s3_uri,
-            language_code=comprehend_config.get("language_code", "en"),
-            input_format=comprehend_config.get("input_format", "ONE_DOC_PER_FILE"),
-            job_name_prefix=comprehend_config.get("job_name_prefix", "ampav-aws-comprehend-live"),
-        )
+        try:
+            result = client.process(
+                input_location.uri,
+                output_s3_uri=output_s3_uri,
+                delete_output=True,
+                language_code=comprehend_config.get("language_code", "en"),
+                input_format=comprehend_config.get("input_format", "ONE_DOC_PER_FILE"),
+                job_name_prefix=job_name_prefix,
+            )
+        finally:
+            delete_object(client.s3_client, input_location)
 
-        result = client.wait(job, cleanup_policy=CleanupPolicy(delete_input=True, delete_output=True))
-
-        self.assertGreaterEqual(len(result.records), 1)
-        self.assertIn("Entities", result.records[0])
-        entity_text = " ".join(entity["Text"] for entity in result.records[0]["Entities"])
+        records = result.tool_private["raw_records"]
+        self.assertGreaterEqual(len(records), 1)
+        self.assertIn("Entities", records[0])
+        entity_text = " ".join(entity["Text"] for entity in records[0]["Entities"])
         self.assertTrue(any(term in entity_text for term in {"Maya", "Indiana", "Amazon", "Seattle"}))
 
 

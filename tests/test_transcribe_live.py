@@ -7,6 +7,7 @@ import yaml
 
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 from ampav.aws.transcribe_contract import validate_aws_transcript_contract
+from ampav_aws_utils.s3_files import delete_object, upload_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,9 @@ class AwsTranscribeLiveTest(unittest.TestCase):
         polling_config = config.get("polling", {})
 
         output_bucket = s3_config.get("output_bucket") or s3_config.get("bucket")
+        input_bucket = s3_config.get("input_bucket") or s3_config.get("bucket")
         self.assertIsNotNone(output_bucket)
+        self.assertIsNotNone(input_bucket)
 
         client = AwsTranscribe(
             region_name=aws_config.get("region"),
@@ -35,15 +38,24 @@ class AwsTranscribeLiveTest(unittest.TestCase):
             polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
             timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
         )
-        output = client.process(
+        job_name_prefix = transcription_config.pop("job_name_prefix", "ampav-aws-transcribe")
+        input_location = upload_file(
+            client.s3_client,
             SAMPLE_AUDIO,
-            output_bucket=output_bucket,
-            input_bucket=s3_config.get("input_bucket") or s3_config.get("bucket"),
-            input_prefix=s3_config.get("input_prefix", "aws_transcribe/input"),
-            output_prefix=s3_config.get("output_prefix", "aws_transcribe/output"),
-            job_name_prefix=transcription_config.pop("job_name_prefix", "ampav-aws-transcribe"),
-            transcription=TranscriptionSettings(**transcription_config),
+            bucket=input_bucket,
+            prefix=s3_config.get("input_prefix", "aws_transcribe/input"),
+            name_prefix=job_name_prefix,
         )
+        try:
+            output = client.process(
+                input_location.uri,
+                output_s3_uri=f"s3://{output_bucket}/{s3_config.get('output_prefix', 'aws_transcribe/output').strip('/')}/opendoor-live.json",
+                delete_output=True,
+                job_name_prefix=job_name_prefix,
+                transcription=TranscriptionSettings(**transcription_config),
+            )
+        finally:
+            delete_object(client.s3_client, input_location)
 
         validate_aws_transcript_contract(output.tool_private["raw_transcript"])
         self.assertIsNotNone(output.output)

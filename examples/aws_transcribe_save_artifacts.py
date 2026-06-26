@@ -6,30 +6,33 @@ AWS troubleshooting data to its own artifact folder.
 """
 
 from argparse import ArgumentParser
+from datetime import datetime, timezone
 import json
 from pathlib import Path
-from time import time
 
 from ampav.aws.transcribe import AwsTranscribe
+from ampav.aws.transcribe import safe_job_part
 
 
 def main() -> None:
     """Run the artifact-persistence example from command-line arguments."""
-    parser = ArgumentParser(description="Transcribe media and save selected run artifacts locally.")
-    parser.add_argument("media")
-    parser.add_argument("--output-bucket", required=True)
+    parser = ArgumentParser(description="Transcribe existing S3 media and save selected run artifacts locally.")
+    parser.add_argument("media_uri")
+    parser.add_argument("--output-s3-uri")
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--profile")
     parser.add_argument("--region")
     args = parser.parse_args()
 
-    run_dir = args.run_dir / str(int(time()))
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    media_stem = safe_job_part(Path(str(args.media_uri).rstrip("/")).stem) or "media"
+    run_dir = args.run_dir / f"{timestamp}-aws-transcribe-{media_stem}"
     run_dir.mkdir(parents=True, exist_ok=False)
 
     client = AwsTranscribe(profile_name=args.profile, region_name=args.region)
     result = client.process(
-        args.media,
-        output_bucket=args.output_bucket,
+        args.media_uri,
+        output_s3_uri=args.output_s3_uri,
     )
 
     (run_dir / "tool_output.yaml").write_text(result.model_dump_yaml(sort_keys=False))

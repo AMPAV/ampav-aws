@@ -13,8 +13,8 @@ def main() -> None:
     """Run the S3-media transcription example from command-line arguments."""
     parser = ArgumentParser(description="Transcribe an existing s3:// media object with AWS Transcribe.")
     parser.add_argument("media_uri")
-    parser.add_argument("--output-bucket", required=True)
-    parser.add_argument("--output-key")
+    parser.add_argument("--output-s3-uri")
+    parser.add_argument("--delete-output", action="store_true")
     parser.add_argument("--profile")
     parser.add_argument("--region")
     args = parser.parse_args()
@@ -22,8 +22,8 @@ def main() -> None:
     client = AwsTranscribe(profile_name=args.profile, region_name=args.region)
     result = client.process(
         args.media_uri,
-        output_bucket=args.output_bucket,
-        output_key=args.output_key,
+        output_s3_uri=args.output_s3_uri,
+        delete_output=args.delete_output,
         transcription=TranscriptionSettings(),
     )
     print(result.model_dump_yaml(sort_keys=False))

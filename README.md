@@ -4,12 +4,14 @@ AWS tooling for AMPAV.
 
 ## AWS Transcribe
 
-`ampav-aws` provides a small AWS Transcribe client plus a CLI. It returns AMPAV
-`ToolOutput` objects whose `output` is an AMPAV `Transcript`.
+`ampav-aws` provides small AWS clients plus CLI/example code. AWS Transcribe
+returns AMPAV `ToolOutput` objects whose `output` is an AMPAV `Transcript`.
 
 The library API is job-oriented: submit a job, wait for completion, fetch the
-transcript, and optionally clean up AWS-side resources. It supports both existing
-`s3://bucket/key` media and local files that need to be uploaded first.
+result, and clean up AWS-side job records/resources owned by the tool. Library
+methods expect provider-native inputs such as `s3://bucket/key`. Local file
+upload, config loading, and artifact persistence are client concerns handled by
+CLI, examples, or application code.
 
 ## Python API
 
@@ -21,36 +23,18 @@ from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 client = AwsTranscribe(region_name="us-east-2", profile_name="my-profile")
 result = client.process(
     "s3://my-bucket/input/audio.wav",
-    output_bucket="my-bucket",
-    output_key="output/audio.json",
+    output_s3_uri="s3://my-bucket/output/audio.json",
     transcription=TranscriptionSettings(language_code="en-US"),
 )
 
 print(result.output.text)
 ```
 
-Use a local file:
-
-```python
-from pathlib import Path
-
-from ampav.aws.transcribe import AwsTranscribe
-
-client = AwsTranscribe(region_name="us-east-2")
-result = client.process(
-    Path("tests/fixtures/OpenDoor.wav"),
-    output_bucket="my-bucket",
-    input_prefix="aws_transcribe/input",
-    output_prefix="aws_transcribe/output",
-)
-```
-
 For lower-level job lifecycle control, use `AwsTranscribe` directly and call
-`submit()`, `get_status()`, `get_job()`, `get_external_result()`,
-`to_tool_output()`, and `cleanup()`. `submit()` accepts media that already
-exists in S3 and returns an `AwsTranscribeJob` with the AWS job name and S3
-locations. `process()` is the high-level path for either local files or S3
-media.
+`submit()`, `get_status()`, `list_jobs()`, `get_result()`, and `cleanup()`.
+`submit()` accepts media that already exists in S3 and returns an opaque AWS job
+ID string. `process()` is the high-level blocking path for provider-native
+inputs.
 
 `ToolOutput.tool_private` contains raw AWS job/transcript data for
 troubleshooting. Normal client code should use `ToolOutput.output`.
@@ -65,18 +49,17 @@ ampav_aws_transcribe -h
 
 ```bash
 ampav_aws_transcribe s3://my-bucket/input/audio.wav \
-  --output-bucket my-bucket \
-  --output-key output/audio.json \
+  --output-s3-uri s3://my-bucket/output/audio.json \
   --region us-east-2
 ```
 
 For local files:
 
 ```bash
-ampav_aws_transcribe tests/fixtures/OpenDoor.wav \
-  --output-bucket my-bucket \
+ampav_aws_transcribe examples/data/AMP-Intro.m4a \
+  --input-bucket my-bucket \
   --input-prefix aws_transcribe/input \
-  --output-prefix aws_transcribe/output \
+  --output-s3-uri s3://my-bucket/aws_transcribe/output/AMP-Intro.json \
   --region us-east-2
 ```
 
@@ -88,11 +71,12 @@ Do not put AWS secret keys on the command line. Use boto3-native auth:
 - `~/.aws/config` and `~/.aws/credentials`
 - IAM role credentials where available
 
-Cleanup flags are explicit and off by default:
+If the CLI uploads a local input file, it deletes that uploaded input by
+default. Pass `--keep-input` to keep it. Caller-supplied output is kept by
+default; pass `--delete-output` to remove it after retrieval.
 
-- `--delete-job`
-- `--delete-input`
-- `--delete-output`
+The library always attempts provider job cleanup after terminal result
+retrieval.
 
 ## Examples
 
@@ -103,9 +87,11 @@ defaults. See `examples/` for patterns:
 - `aws_transcribe_local_file.py`: upload a local file, then transcribe it.
 - `aws_transcribe_with_yaml_config.py`: keep structured config in client code.
 - `aws_transcribe_save_artifacts.py`: persist selected run artifacts outside the library.
-- `aws_transcribe_config.example.yaml`: sample config for the YAML example.
+- `aws_config.example.yaml`: sample shared AWS config for examples.
+- `examples/data/`: small curated example data.
 
-Keep real credentials, local configs, and generated outputs outside git.
+Keep real credentials, local configs, generated logs, and ad hoc run outputs in
+`.work/`, not in git.
 
 ## Tests
 
@@ -119,6 +105,6 @@ An optional live AWS smoke test is skipped by default:
 
 ```bash
 AMPAV_AWS_TRANSCRIBE_LIVE_TEST=1 \
-AMPAV_AWS_TRANSCRIBE_CONFIG=/path/to/aws_transcribe_config.yaml \
+AMPAV_AWS_TRANSCRIBE_CONFIG=/path/to/aws_config.yaml \
 /home/yingfeng/AMPAV/.venv/bin/python -m unittest discover -s tests
 ```

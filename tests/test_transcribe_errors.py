@@ -7,6 +7,7 @@ from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 class FailedTranscribeClient:
     def __init__(self) -> None:
         self.started: list[dict] = []
+        self.deleted: list[str] = []
 
     def start_transcription_job(self, **request: object) -> dict:
         self.started.append(request)
@@ -21,6 +22,9 @@ class FailedTranscribeClient:
             }
         }
 
+    def delete_transcription_job(self, TranscriptionJobName: str) -> None:
+        self.deleted.append(TranscriptionJobName)
+
 
 class AwsTranscribeErrorTest(unittest.TestCase):
     def test_failed_job_raises_typed_error(self) -> None:
@@ -29,8 +33,7 @@ class AwsTranscribeErrorTest(unittest.TestCase):
         with self.assertRaises(AwsTranscribeError) as caught:
             client.process(
                 "s3://input/audio.wav",
-                output_bucket="out",
-                output_key="result.json",
+                output_s3_uri="s3://out/result.json",
                 job_name="test-job",
                 transcription=TranscriptionSettings(media_format="wav"),
             )
