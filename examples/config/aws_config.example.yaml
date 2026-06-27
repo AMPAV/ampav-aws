@@ -8,7 +8,6 @@ aws:
 
 s3:
   bucket: YOUR_AWS_BUCKET
-  input_prefix: aws_transcribe/input
   output_s3_uri:
   delete_output: false
   keep_uploaded_input: false
@@ -18,18 +17,17 @@ polling:
   timeout: 7200
 
 transcription:
-  media_format: wav
+  media_format: m4a
   language_code: en-US
   identify_language: false
   language_options: []
   show_speaker_labels: true
   max_speaker_labels: 10
-  job_name_prefix: ampav-aws-transcribe
+  job_name_suffix: AMP-Intro
 
 comprehend:
   data_access_role_arn: YOUR_COMPREHEND_DATA_ACCESS_ROLE_ARN
-  input_prefix: aws_comprehend/input
   output_prefix: aws_comprehend/output
   language_code: en
   input_format: ONE_DOC_PER_FILE
-  job_name_prefix: ampav-aws-comprehend
+  job_name_suffix: AMP-Intro

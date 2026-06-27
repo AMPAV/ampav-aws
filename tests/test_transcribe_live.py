@@ -7,7 +7,7 @@ import yaml
 
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 from ampav.aws.transcribe_contract import validate_aws_transcript_contract
-from ampav_aws_utils.s3_files import delete_object, upload_file
+from ampav_aws_utils.s3_files import upload_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ class AwsTranscribeLiveTest(unittest.TestCase):
         config = load_yaml(Path(os.environ["AMPAV_AWS_TRANSCRIBE_CONFIG"]))
         aws_config = config.get("aws", {})
         s3_config = config.get("s3", {})
-        transcription_config = config.get("transcription", {})
+        transcription_config = dict(config.get("transcription", {}))
         polling_config = config.get("polling", {})
 
         output_bucket = s3_config.get("output_bucket") or s3_config.get("bucket")
@@ -38,24 +38,26 @@ class AwsTranscribeLiveTest(unittest.TestCase):
             polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
             timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
         )
-        job_name_prefix = transcription_config.pop("job_name_prefix", "ampav-aws-transcribe")
+        transcription_config.pop("job_name_prefix", None)
+        job_name_suffix = transcription_config.pop("job_name_suffix", "OpenDoor")
         input_location = upload_file(
             client.s3_client,
             SAMPLE_AUDIO,
             bucket=input_bucket,
             prefix=s3_config.get("input_prefix", "aws_transcribe/input"),
-            name_prefix=job_name_prefix,
+            name_prefix="ampav-aws-transcribe",
         )
         try:
             output = client.process(
                 input_location.uri,
                 output_s3_uri=f"s3://{output_bucket}/{s3_config.get('output_prefix', 'aws_transcribe/output').strip('/')}/opendoor-live.json",
                 delete_output=True,
-                job_name_prefix=job_name_prefix,
+                job_name_suffix=job_name_suffix,
+                include_tool_private=True,
                 transcription=TranscriptionSettings(**transcription_config),
             )
         finally:
-            delete_object(client.s3_client, input_location)
+            client.s3_client.delete_object(Bucket=input_location.bucket, Key=input_location.key)
 
         validate_aws_transcript_contract(output.tool_private["raw_transcript"])
         self.assertIsNotNone(output.output)

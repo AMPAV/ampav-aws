@@ -36,8 +36,8 @@ For lower-level job lifecycle control, use `AwsTranscribe` directly and call
 ID string. `process()` is the high-level blocking path for provider-native
 inputs.
 
-`ToolOutput.tool_private` contains raw AWS job/transcript data for
-troubleshooting. Normal client code should use `ToolOutput.output`.
+Pass `include_tool_private=True` only when you need raw AWS job/transcript data
+for troubleshooting. Normal client code should use `ToolOutput.output`.
 
 ## CLI
 
@@ -81,14 +81,14 @@ retrieval.
 ## Examples
 
 Config loading and local artifact persistence are client concerns, not library
-defaults. See `examples/` for patterns:
+defaults. For local testing, copy `examples/` outside the repo, copy
+`config/aws_config.example.yaml` to `config/aws_config.yaml`, update the copied
+config for your AWS account, then run the copied scripts.
 
-- `aws_transcribe_from_s3.py`: transcribe existing `s3://` media.
-- `aws_transcribe_local_file.py`: upload a local file, then transcribe it.
-- `aws_transcribe_with_yaml_config.py`: keep structured config in client code.
-- `aws_transcribe_save_artifacts.py`: persist selected run artifacts outside the library.
-- `aws_config.example.yaml`: sample shared AWS config for examples.
-- `examples/data/`: small curated example data.
+- `aws_transcribe_file_example.py`: upload `data/AMP-Intro.m4a`, transcribe it, and write a `ToolOutput` YAML file.
+- `aws_transcribe_s3_example.py`: transcribe an existing `s3://` media URI and write a `ToolOutput` YAML file.
+- `config/aws_config.example.yaml`: sample shared AWS config for examples.
+- `data/`: small curated inputs and checked-in example outputs.
 
 Keep real credentials, local configs, generated logs, and ad hoc run outputs in
 `.work/`, not in git.
@@ -98,7 +98,7 @@ Keep real credentials, local configs, generated logs, and ad hoc run outputs in
 Routine tests are offline and deterministic:
 
 ```bash
-/home/yingfeng/AMPAV/.venv/bin/python -m unittest discover -s tests
+python -m unittest discover -s tests
 ```
 
 An optional live AWS smoke test is skipped by default:
@@ -106,5 +106,5 @@ An optional live AWS smoke test is skipped by default:
 ```bash
 AMPAV_AWS_TRANSCRIBE_LIVE_TEST=1 \
 AMPAV_AWS_TRANSCRIBE_CONFIG=/path/to/aws_config.yaml \
-/home/yingfeng/AMPAV/.venv/bin/python -m unittest discover -s tests
+python -m unittest discover -s tests
 ```

@@ -7,8 +7,7 @@ from typing import Any
 import yaml
 
 from ampav.aws.comprehend import AwsComprehend
-from ampav.aws.s3 import join_s3_key
-from ampav_aws_utils.s3_files import delete_object, upload_text
+from ampav.aws.s3 import S3Location, join_s3_key
 
 
 SAMPLE_TEXT = (
@@ -42,13 +41,17 @@ class AwsComprehendLiveTest(unittest.TestCase):
             polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
             timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
         )
-        job_name_prefix = comprehend_config.get("job_name_prefix", "ampav-aws-comprehend-live")
+        job_name_suffix = comprehend_config.get("job_name_suffix", "live")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        input_location = upload_text(
-            client.s3_client,
-            SAMPLE_TEXT,
+        input_location = S3Location(
             bucket=bucket,
-            key=join_s3_key(comprehend_config.get("input_prefix", "aws_comprehend/input"), f"{job_name_prefix}-{timestamp}.txt"),
+            key=join_s3_key("aws_comprehend/input", f"ampav-aws-comprehend-{timestamp}.txt"),
+        )
+        client.s3_client.put_object(
+            Bucket=input_location.bucket,
+            Key=input_location.key,
+            Body=SAMPLE_TEXT.encode("utf-8"),
+            ContentType="text/plain; charset=utf-8",
         )
         output_s3_uri = f"s3://{bucket}/{comprehend_config.get('output_prefix', 'aws_comprehend/output').strip('/')}"
         try:
@@ -58,10 +61,11 @@ class AwsComprehendLiveTest(unittest.TestCase):
                 delete_output=True,
                 language_code=comprehend_config.get("language_code", "en"),
                 input_format=comprehend_config.get("input_format", "ONE_DOC_PER_FILE"),
-                job_name_prefix=job_name_prefix,
+                job_name_suffix=job_name_suffix,
+                include_tool_private=True,
             )
         finally:
-            delete_object(client.s3_client, input_location)
+            client.s3_client.delete_object(Bucket=input_location.bucket, Key=input_location.key)
 
         records = result.tool_private["raw_records"]
         self.assertGreaterEqual(len(records), 1)

@@ -34,11 +34,12 @@ class AwsTranscribeErrorTest(unittest.TestCase):
             client.process(
                 "s3://input/audio.wav",
                 output_s3_uri="s3://out/result.json",
-                job_name="test-job",
+                job_name_suffix="test-job",
                 transcription=TranscriptionSettings(media_format="wav"),
             )
 
-        self.assertEqual(caught.exception.job_name, "test-job")
+        self.assertTrue(caught.exception.job_name.startswith("ampav-aws-transcribe-"))
+        self.assertTrue(caught.exception.job_name.endswith("-test-job"))
         self.assertIn("test failure", str(caught.exception))
 
 

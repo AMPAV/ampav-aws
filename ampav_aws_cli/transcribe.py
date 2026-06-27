@@ -12,7 +12,7 @@ from ampav.core.async_tool import ToolError
 from ampav.core.logging import LOG_FORMAT
 from ampav.aws.s3 import S3Location
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
-from ampav_aws_utils.s3_files import delete_object, upload_file
+from ampav_aws_utils.s3_files import upload_file
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
@@ -25,8 +25,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-key", help="S3 key for uploading a local media file")
     parser.add_argument("--input-prefix", default="aws_transcribe/input", help="S3 prefix for generated input keys")
     parser.add_argument("--keep-input", action="store_true", help="Keep CLI-uploaded input S3 object after the run")
-    parser.add_argument("--job-name", help="AWS Transcribe job name; generated when omitted")
-    parser.add_argument("--job-name-prefix", default="ampav-aws-transcribe", help="Prefix for generated job names")
+    parser.add_argument("--job-name-suffix", help="Human-readable suffix for the generated AWS job name")
+    parser.add_argument("--include-tool-private", action="store_true", help="Include raw AWS payloads in ToolOutput.tool_private")
     parser.add_argument("--media-format", help="AWS media format; inferred from extension when omitted")
     parser.add_argument("--language-code", default="en-US", help="AWS language code when language identification is off")
     parser.add_argument("--identify-language", action="store_true", help="Enable AWS language identification")
@@ -59,28 +59,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile_name=args.profile,
         polling_interval=args.poll_interval,
         timeout=args.timeout,
-        job_name_prefix=args.job_name_prefix,
     )
 
     uploaded_input = None
     try:
-        media_uri, uploaded_input = _prepare_media_uri(
+        input_s3_uri, uploaded_input = _prepare_media_uri(
             aws,
             args.media,
             input_bucket=args.input_bucket,
             input_key=args.input_key,
             input_prefix=args.input_prefix,
-            job_name_prefix=args.job_name_prefix,
         )
 
         result = aws.process(
-            media_uri,
+            input_s3_uri,
             output_s3_uri=args.output_s3_uri,
             delete_output=args.delete_output,
-            job_name=args.job_name,
-            job_name_prefix=args.job_name_prefix,
+            job_name_suffix=args.job_name_suffix,
+            include_tool_private=args.include_tool_private,
             transcription=transcription,
-            timeout=args.timeout,
         )
     except Exception as exc:
         cli_errors = (ToolError, BotoCoreError, ClientError, OSError, ValueError)
@@ -90,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     finally:
         if uploaded_input is not None and not args.keep_input:
-            delete_object(aws.s3_client, uploaded_input)
+            aws.s3_client.delete_object(Bucket=uploaded_input.bucket, Key=uploaded_input.key)
 
     print(result.model_dump_yaml(sort_keys=False))
     return 0
@@ -103,7 +100,6 @@ def _prepare_media_uri(
     input_bucket: str | None,
     input_key: str | None,
     input_prefix: str,
-    job_name_prefix: str,
 ) -> tuple[str, S3Location | None]:
     media_str = str(media)
     if media_str.startswith("s3://"):
@@ -116,7 +112,7 @@ def _prepare_media_uri(
         bucket=input_bucket,
         key=input_key,
         prefix=input_prefix,
-        name_prefix=job_name_prefix,
+        name_prefix="ampav-aws-transcribe",
     )
     logging.info("Uploaded local media to %s", location.uri)
     return location.uri, location

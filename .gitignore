@@ -70,8 +70,7 @@ venv.bak/
 .cursorignore
 .cursorindexingignore
 
-# Runtime data should live outside this repo under AMPAV/test_data/.
-# Ignore it if someone accidentally creates it inside the package repo.
+# Runtime data and local configs stay out of source control.
 .work/
 test_data/
 test-data/

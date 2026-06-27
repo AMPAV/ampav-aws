@@ -13,16 +13,17 @@ import boto3
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool, ToolError
+from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import ToolOutput
 
+from ._job import _AwsJobMeta
 from .errors import AwsTranscribeError, AwsTranscriptSchemaError
-from .s3 import S3Location, join_s3_key, parse_s3_uri
+from .s3 import S3Location, parse_s3_uri
 from .transcribe_contract import validate_aws_transcript_contract
 from .transcribe_conversion import aws_transcript_to_transcript
 
 
-_UNSET = object()
+_JOB_NAME_PREFIX = "ampav-aws-transcribe"
 
 
 class StrictModel(BaseModel):
@@ -48,23 +49,12 @@ class TranscriptionSettings(StrictModel):
         return self
 
 
-class AwsTranscribeStatus(AsyncJobStatus):
-    """AWS Transcribe status mapped onto AMPAV async status."""
-
-    aws_status: str
-    failure_reason: str | None = None
-    transcript_file_uri: str | None = None
-
-
 class AwsTranscribe(AsyncTool):
     """Low-level AWS Transcribe client.
 
     The public lifecycle uses opaque `job_id` strings. The tool API expects
     provider-native S3 media URIs; local file upload belongs in CLI/example code.
     """
-
-    polling_interval: float = 30
-    timeout: float | None = 7200
 
     def __init__(
         self,
@@ -76,7 +66,6 @@ class AwsTranscribe(AsyncTool):
         s3_client: Any | None = None,
         polling_interval: float = 30,
         timeout: float | None = 7200,
-        job_name_prefix: str = "ampav-aws-transcribe",
     ):
         """Create an AWS Transcribe client from boto3 settings or injected clients."""
         if polling_interval <= 0:
@@ -90,31 +79,27 @@ class AwsTranscribe(AsyncTool):
         self.s3_client = s3_client or session.client("s3")
         self.polling_interval = polling_interval
         self.timeout = timeout
-        self.job_name_prefix = job_name_prefix
-        self._delete_output_by_job_id: dict[str, bool] = {}
-        self._owned_output_by_job_id: dict[str, bool] = {}
-        self._media_uri_by_job_id: dict[str, str] = {}
+        self._job_meta_by_id: dict[str, _AwsJobMeta] = {}
 
     def submit(
         self,
-        media_uri: str,
+        input_s3_uri: str,
         *,
         output_s3_uri: str | None = None,
         delete_output: bool = False,
-        job_name: str | None = None,
-        job_name_prefix: str | None = None,
+        job_name_suffix: str | None = None,
+        include_tool_private: bool = False,
         transcription: TranscriptionSettings | None = None,
     ) -> str:
         """Submit an AWS Transcribe job for media that already exists in S3."""
-        parse_s3_uri(media_uri)
+        parse_s3_uri(input_s3_uri)
         output_location = parse_s3_uri(output_s3_uri) if output_s3_uri else None
         transcription = transcription or TranscriptionSettings()
-        prefix = job_name_prefix or self.job_name_prefix
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        job_id = job_name or build_job_name(media_uri, prefix, timestamp)
+        job_id = build_job_name(job_name_suffix or input_s3_uri, _JOB_NAME_PREFIX, timestamp)
         request = build_start_job_request(
             job_name=job_id,
-            media_uri=media_uri,
+            input_s3_uri=input_s3_uri,
             output_location=output_location,
             transcription=transcription,
         )
@@ -122,12 +107,14 @@ class AwsTranscribe(AsyncTool):
         logging.info("Starting AWS Transcribe job %s", job_id)
         logging.debug("AWS Transcribe request: %s", json.dumps(request, default=str, sort_keys=True))
         self.transcribe_client.start_transcription_job(**request)
-        self._delete_output_by_job_id[job_id] = delete_output
-        self._owned_output_by_job_id[job_id] = False
-        self._media_uri_by_job_id[job_id] = media_uri
+        self._job_meta_by_id[job_id] = _AwsJobMeta(
+            delete_output=delete_output,
+            owned_output=False,
+            include_tool_private=include_tool_private,
+        )
         return job_id
 
-    def get_status(self, job_id: str, details: bool = True) -> AwsTranscribeStatus:
+    def get_status(self, job_id: str, details: bool = True) -> AsyncJobStatus:
         """Return normalized status information for an AWS Transcribe job."""
         raw_job = self._get_job(job_id)
         job_data = raw_job["TranscriptionJob"]
@@ -135,7 +122,7 @@ class AwsTranscribe(AsyncTool):
 
     def list_jobs(self) -> list[AsyncJobStatus]:
         """Return AWS Transcribe jobs matching this instance's job-name prefix."""
-        response = self.transcribe_client.list_transcription_jobs(JobNameContains=self.job_name_prefix)
+        response = self.transcribe_client.list_transcription_jobs(JobNameContains=_JOB_NAME_PREFIX)
         summaries = response.get("TranscriptionJobSummaries", [])
         statuses: list[AsyncJobStatus] = []
         for summary in summaries:
@@ -143,15 +130,13 @@ class AwsTranscribe(AsyncTool):
             aws_status = summary.get("TranscriptionJobStatus")
             if not isinstance(job_id, str) or not isinstance(aws_status, str):
                 continue
-            if not job_id.startswith(self.job_name_prefix):
+            if not job_id.startswith(_JOB_NAME_PREFIX):
                 continue
             statuses.append(
-                AwsTranscribeStatus(
+                AsyncJobStatus(
                     job_id=job_id,
                     status=map_aws_transcribe_status(aws_status),
                     message=summary.get("FailureReason"),
-                    aws_status=aws_status,
-                    failure_reason=summary.get("FailureReason"),
                 )
             )
         return statuses
@@ -166,19 +151,21 @@ class AwsTranscribe(AsyncTool):
 
         if status.status != AsyncStatusCode.SUCCEEDED:
             self.cleanup(job_id)
-            reason = status.failure_reason or "no failure reason returned"
+            reason = status.message or "no failure reason returned"
             raise AwsTranscribeError(job_id, f"failed: {reason}")
 
         raw_transcript = self._read_transcript_json(job_data)
         output = self._to_tool_output(job_id, raw_job, raw_transcript)
         self._delete_output_if_needed(job_id, raw_job)
         self._delete_job_record(job_id)
+        self._delete_meta(job_id)
         return output
 
     def cleanup(self, job_id: str) -> None:
         """Clean up output owned/requested by this tool and delete the job record."""
         raw_job = self._get_job_or_none(job_id)
         if raw_job is None:
+            self._delete_meta(job_id)
             return
 
         status = _status_from_job_data(raw_job["TranscriptionJob"])
@@ -189,31 +176,27 @@ class AwsTranscribe(AsyncTool):
             time.sleep(self.polling_interval)
             raw_job = self._get_job_or_none(job_id)
             if raw_job is None:
+                self._delete_meta(job_id)
                 return
             status = _status_from_job_data(raw_job["TranscriptionJob"])
 
         self._delete_output_if_needed(job_id, raw_job)
         self._delete_job_record(job_id)
+        self._delete_meta(job_id)
 
     def process(
         self,
-        media_uri: str,
-        *,
-        timeout: float | None | object = _UNSET,
+        input_s3_uri: str,
         **kwargs: Any,
     ) -> ToolOutput:
         """Submit a Transcribe job, wait for completion, clean up, and return output."""
-        effective_timeout = self.timeout if timeout is _UNSET else timeout
-        if effective_timeout is not None and effective_timeout <= 0:
-            raise ValueError("timeout must be greater than 0 when set")
-
-        job_id = self.submit(media_uri, **kwargs)
+        job_id = self.submit(input_s3_uri, **kwargs)
         started = time.monotonic()
         while not self.is_done(job_id):
             logging.info("AWS Transcribe job %s is still running", job_id)
-            if effective_timeout is not None and time.monotonic() - started > effective_timeout:
+            if self.timeout is not None and time.monotonic() - started > self.timeout:
                 self.cleanup(job_id)
-                raise AwsTranscribeError(job_id, f"did not finish within {effective_timeout} seconds")
+                raise AwsTranscribeError(job_id, f"did not finish within {self.timeout} seconds")
             time.sleep(self.polling_interval)
 
         result = self.get_result(job_id)
@@ -231,7 +214,6 @@ class AwsTranscribe(AsyncTool):
         return ToolOutput(
             tool_name="aws_transcribe",
             output=transcript,
-            tool_private={"raw_transcript": json_safe(native)},
         )
 
     def _get_job(self, job_id: str) -> dict[str, Any]:
@@ -276,7 +258,16 @@ class AwsTranscribe(AsyncTool):
         aws_model = validate_aws_transcript_contract(raw_transcript)
         transcript = aws_transcript_to_transcript(aws_model)
         job_data = raw_job.get("TranscriptionJob", {})
-        parameters = tool_parameters(job_id, job_data)
+        parameters = tool_parameters(job_data)
+        tool_private = None
+        if self._job_meta_by_id.get(job_id, _AwsJobMeta()).include_tool_private:
+            tool_private = {
+                "aws_transcribe_job": {
+                    "name": job_id,
+                },
+                "raw_transcription_job": json_safe(raw_job),
+                "raw_transcript": json_safe(raw_transcript),
+            }
 
         return ToolOutput(
             tool_name="aws_transcribe",
@@ -285,15 +276,7 @@ class AwsTranscribe(AsyncTool):
             start_time=timestamp_or_none(job_data.get("StartTime")) or timestamp_or_none(job_data.get("CreationTime")),
             end_time=timestamp_or_none(job_data.get("CompletionTime")) or time.time(),
             output=transcript,
-            tool_private={
-                "aws_transcribe_job": {
-                    "name": job_id,
-                    "media_uri": parameters.get("content_source"),
-                    "transcript_file_uri": parameters.get("transcript_file_uri"),
-                },
-                "raw_transcription_job": json_safe(raw_job),
-                "raw_transcript": json_safe(raw_transcript),
-            },
+            tool_private=tool_private,
         )
 
     def _delete_output_if_needed(self, job_id: str, raw_job: dict[str, Any]) -> None:
@@ -306,7 +289,8 @@ class AwsTranscribe(AsyncTool):
         self.s3_client.delete_object(Bucket=location.bucket, Key=location.key)
 
     def _should_delete_output(self, job_id: str) -> bool:
-        return self._delete_output_by_job_id.get(job_id, False) or self._owned_output_by_job_id.get(job_id, False)
+        meta = self._job_meta_by_id.get(job_id)
+        return bool(meta and (meta.delete_output or meta.owned_output))
 
     def _delete_job_record(self, job_id: str) -> None:
         try:
@@ -316,19 +300,22 @@ class AwsTranscribe(AsyncTool):
                 return
             raise
 
+    def _delete_meta(self, job_id: str) -> None:
+        self._job_meta_by_id.pop(job_id, None)
+
 
 def build_start_job_request(
     *,
     job_name: str,
-    media_uri: str,
+    input_s3_uri: str,
     output_location: S3Location | None,
     transcription: TranscriptionSettings,
 ) -> dict[str, Any]:
     """Build a boto3 `start_transcription_job` request body."""
     request: dict[str, Any] = {
         "TranscriptionJobName": job_name,
-        "Media": {"MediaFileUri": media_uri},
-        "MediaFormat": transcription.media_format or infer_media_format(media_uri),
+        "Media": {"MediaFileUri": input_s3_uri},
+        "MediaFormat": transcription.media_format or infer_media_format(input_s3_uri),
     }
 
     if output_location is not None:
@@ -388,15 +375,15 @@ def timestamp_or_none(value: object) -> float | None:
     return value.timestamp() if isinstance(value, datetime) else None
 
 
-def tool_parameters(job_id: str, job_data: dict[str, Any]) -> dict[str, Any]:
-    transcript_uri = _transcript_file_uri(job_data)
-    media_uri = job_data.get("Media", {}).get("MediaFileUri")
+def tool_parameters(job_data: dict[str, Any]) -> dict[str, Any]:
+    settings = job_data.get("Settings") or {}
     parameters = {
-        "job_id": job_id,
-        "content_source": media_uri,
-        "transcript_file_uri": transcript_uri,
+        "media_format": job_data.get("MediaFormat"),
         "language_code": job_data.get("LanguageCode"),
         "identified_language_score": job_data.get("IdentifiedLanguageScore"),
+        "identify_language": job_data.get("IdentifyLanguage"),
+        "show_speaker_labels": settings.get("ShowSpeakerLabels"),
+        "max_speaker_labels": settings.get("MaxSpeakerLabels"),
     }
     return {key: value for key, value in parameters.items() if value is not None}
 
@@ -405,16 +392,13 @@ def json_safe(data: Any) -> Any:
     return json.loads(json.dumps(data, default=str))
 
 
-def _status_from_job_data(job_data: dict[str, Any]) -> AwsTranscribeStatus:
+def _status_from_job_data(job_data: dict[str, Any]) -> AsyncJobStatus:
     aws_status = job_data["TranscriptionJobStatus"]
     failure_reason = job_data.get("FailureReason")
-    return AwsTranscribeStatus(
+    return AsyncJobStatus(
         job_id=job_data["TranscriptionJobName"],
         status=map_aws_transcribe_status(aws_status),
         message=failure_reason,
-        aws_status=aws_status,
-        failure_reason=failure_reason,
-        transcript_file_uri=_transcript_file_uri(job_data),
     )
 
 

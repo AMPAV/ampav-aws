@@ -30,28 +30,3 @@ def upload_file(
 
     s3_client.upload_file(str(source_path), bucket, key)
     return S3Location(bucket=bucket, key=key)
-
-
-def delete_object(s3_client: object, location: S3Location) -> None:
-    """Delete a single S3 object."""
-    s3_client.delete_object(Bucket=location.bucket, Key=location.key)
-
-
-def upload_text(
-    s3_client: object,
-    text: str,
-    *,
-    bucket: str,
-    key: str,
-    content_type: str = "text/plain; charset=utf-8",
-) -> S3Location:
-    """Upload UTF-8 text to S3 and return its location."""
-    if not text.strip():
-        raise ValueError("text must not be empty")
-    s3_client.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=text.encode("utf-8"),
-        ContentType=content_type,
-    )
-    return S3Location(bucket=bucket, key=key)
