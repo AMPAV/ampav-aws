@@ -135,6 +135,24 @@ class AwsComprehendApiTest(unittest.TestCase):
         self.assertEqual(request["InputDataConfig"]["InputFormat"], "ONE_DOC_PER_FILE")
         self.assertEqual(request["OutputDataConfig"]["S3Uri"], "s3://out/aws_comprehend/output")
         self.assertEqual(request["LanguageCode"], "en")
+        self.assertNotIn("ClientRequestToken", request)
+
+    def test_submit_applies_tool_level_kms_defaults(self) -> None:
+        comprehend = FakeComprehendClient()
+        s3 = FakeS3Client()
+        client = AwsComprehend(
+            comprehend_client=comprehend,
+            s3_client=s3,
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            output_kms_key_id="arn:aws:kms:us-east-2:123456789012:key/output",
+            volume_kms_key_id="arn:aws:kms:us-east-2:123456789012:key/volume",
+        )
+
+        client.submit("s3://in/input.txt", output_s3_uri="s3://out/output")
+
+        request = comprehend.started[0]
+        self.assertEqual(request["OutputDataConfig"]["KmsKeyId"], "arn:aws:kms:us-east-2:123456789012:key/output")
+        self.assertEqual(request["VolumeKmsKeyId"], "arn:aws:kms:us-east-2:123456789012:key/volume")
 
     def test_submit_requires_role_arn(self) -> None:
         comprehend = FakeComprehendClient()

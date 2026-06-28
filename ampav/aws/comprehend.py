@@ -58,6 +58,8 @@ class AwsComprehend(AsyncTool):
         comprehend_client: Any | None = None,
         s3_client: Any | None = None,
         data_access_role_arn: str | None = None,
+        output_kms_key_id: str | None = None,
+        volume_kms_key_id: str | None = None,
         polling_interval: float = 30,
         timeout: float | None = 7200,
     ):
@@ -72,6 +74,8 @@ class AwsComprehend(AsyncTool):
         self.comprehend_client = comprehend_client or session.client("comprehend")
         self.s3_client = s3_client or session.client("s3")
         self.data_access_role_arn = data_access_role_arn
+        self.output_kms_key_id = output_kms_key_id
+        self.volume_kms_key_id = volume_kms_key_id
         self.polling_interval = polling_interval
         self.timeout = timeout
         self._job_meta_by_id: dict[str, _AwsJobMeta] = {}
@@ -88,9 +92,6 @@ class AwsComprehend(AsyncTool):
         input_format: InputFormat = "ONE_DOC_PER_FILE",
         job_name_suffix: str | None = None,
         entity_recognizer_arn: str | None = None,
-        client_request_token: str | None = None,
-        output_kms_key_id: str | None = None,
-        volume_kms_key_id: str | None = None,
         tags: list[dict[str, str]] | None = None,
     ) -> str:
         """Submit an AWS Comprehend entities job for text input in S3."""
@@ -114,9 +115,8 @@ class AwsComprehend(AsyncTool):
             input_format=input_format,
             job_name=name,
             entity_recognizer_arn=entity_recognizer_arn,
-            client_request_token=client_request_token,
-            output_kms_key_id=output_kms_key_id,
-            volume_kms_key_id=volume_kms_key_id,
+            output_kms_key_id=self.output_kms_key_id,
+            volume_kms_key_id=self.volume_kms_key_id,
             tags=tags,
         )
 
@@ -301,7 +301,6 @@ def build_start_entities_request(
     input_format: InputFormat,
     job_name: str,
     entity_recognizer_arn: str | None = None,
-    client_request_token: str | None = None,
     output_kms_key_id: str | None = None,
     volume_kms_key_id: str | None = None,
     tags: list[dict[str, str]] | None = None,
@@ -316,8 +315,6 @@ def build_start_entities_request(
     }
     if entity_recognizer_arn:
         request["EntityRecognizerArn"] = entity_recognizer_arn
-    if client_request_token:
-        request["ClientRequestToken"] = client_request_token
     if output_kms_key_id:
         request["OutputDataConfig"]["KmsKeyId"] = output_kms_key_id
     if volume_kms_key_id:
