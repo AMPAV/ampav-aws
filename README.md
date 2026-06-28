@@ -24,7 +24,7 @@ client = AwsTranscribe(region_name="us-east-2", profile_name="my-profile")
 result = client.process(
     "s3://my-bucket/input/audio.wav",
     output_s3_uri="s3://my-bucket/output/audio.json",
-    transcription=TranscriptionSettings(language_code="en-US"),
+    transcription_settings=TranscriptionSettings(language_code="en-US"),
 )
 
 print(result.output.text)
@@ -36,8 +36,9 @@ For lower-level job lifecycle control, use `AwsTranscribe` directly and call
 ID string. `process()` is the high-level blocking path for provider-native
 inputs.
 
-Pass `include_tool_private=True` only when you need raw AWS job/transcript data
-for troubleshooting. Normal client code should use `ToolOutput.output`.
+Pass `include_tool_private=True` when constructing the tool only when you need
+raw AWS job/transcript data for troubleshooting. Normal client code should use
+`ToolOutput.output`.
 
 ## CLI
 
@@ -73,7 +74,7 @@ Do not put AWS secret keys on the command line. Use boto3-native auth:
 
 If the CLI uploads a local input file, it deletes that uploaded input by
 default. Pass `--keep-input` to keep it. Caller-supplied output is kept by
-default; pass `--delete-output` to remove it after retrieval.
+default; pass `--delete-user-owned-outputs` to remove it after retrieval.
 
 The library always attempts provider job cleanup after terminal result
 retrieval.
@@ -85,8 +86,8 @@ defaults. For local testing, copy `examples/` outside the repo, copy
 `config/aws_config.example.yaml` to `config/aws_config.yaml`, update the copied
 config for your AWS account, then run the copied scripts.
 
-- `aws_transcribe_file_example.py`: upload `data/AMP-Intro.m4a`, transcribe it, and write a `ToolOutput` YAML file.
-- `aws_transcribe_s3_example.py`: transcribe an existing `s3://` media URI and write a `ToolOutput` YAML file.
+- `aws_transcribe_file_example.py`: upload `data/AMP-Intro.m4a`, transcribe it using copied config, and write a `ToolOutput` YAML file.
+- `aws_transcribe_s3_example.py`: transcribe an existing `s3://` media URI using standard boto3 profile/region settings and write a `ToolOutput` YAML file.
 - `config/aws_config.example.yaml`: sample shared AWS config for examples.
 - `data/`: small curated inputs and checked-in example outputs.
 

@@ -9,7 +9,8 @@ aws:
 s3:
   bucket: YOUR_AWS_BUCKET
   output_s3_uri:
-  delete_output: false
+  delete_user_owned_outputs: false
+  include_tool_private: false
   keep_uploaded_input: false
 
 polling:

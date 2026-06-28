@@ -17,13 +17,14 @@ from pydantic import BaseModel, ConfigDict
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import ToolOutput
 
-from ._job import _AwsJobMeta
 from .errors import AwsComprehendError
+from .job import AwsJobStatus
 from .s3 import join_s3_key, parse_s3_uri
 
 InputFormat = Literal["ONE_DOC_PER_FILE", "ONE_DOC_PER_LINE"]
 
 _JOB_NAME_PREFIX = "ampav-aws-comprehend"
+_TOOL_MANAGED_OUTPUT_PREFIX = "aws_comprehend/_ampav_tmp"
 
 
 class StrictModel(BaseModel):
@@ -58,8 +59,11 @@ class AwsComprehend(AsyncTool):
         comprehend_client: Any | None = None,
         s3_client: Any | None = None,
         data_access_role_arn: str | None = None,
+        entity_recognizer_arn: str | None = None,
         output_kms_key_id: str | None = None,
         volume_kms_key_id: str | None = None,
+        delete_user_owned_outputs: bool = False,
+        include_tool_private: bool = False,
         polling_interval: float = 30,
         timeout: float | None = 7200,
     ):
@@ -74,37 +78,34 @@ class AwsComprehend(AsyncTool):
         self.comprehend_client = comprehend_client or session.client("comprehend")
         self.s3_client = s3_client or session.client("s3")
         self.data_access_role_arn = data_access_role_arn
+        self.entity_recognizer_arn = entity_recognizer_arn
         self.output_kms_key_id = output_kms_key_id
         self.volume_kms_key_id = volume_kms_key_id
+        self.delete_user_owned_outputs = delete_user_owned_outputs
+        self.include_tool_private = include_tool_private
         self.polling_interval = polling_interval
         self.timeout = timeout
-        self._job_meta_by_id: dict[str, _AwsJobMeta] = {}
 
     def submit(
         self,
         input_s3_uri: str,
         *,
         output_s3_uri: str | None = None,
-        delete_output: bool = False,
-        include_tool_private: bool = False,
-        data_access_role_arn: str | None = None,
         language_code: str = "en",
         input_format: InputFormat = "ONE_DOC_PER_FILE",
         job_name_suffix: str | None = None,
-        entity_recognizer_arn: str | None = None,
         tags: list[dict[str, str]] | None = None,
     ) -> str:
         """Submit an AWS Comprehend entities job for text input in S3."""
         input_location = parse_s3_uri(input_s3_uri)
-        role_arn = data_access_role_arn or self.data_access_role_arn
+        role_arn = self.data_access_role_arn
         if not role_arn:
             raise ValueError("data_access_role_arn is required")
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         name = build_job_name(job_name_suffix or input_s3_uri, _JOB_NAME_PREFIX, timestamp)
-        owned_output = output_s3_uri is None
         if output_s3_uri is None:
-            output_s3_uri = f"s3://{input_location.bucket}/{join_s3_key('aws_comprehend/output', name)}"
+            output_s3_uri = f"s3://{input_location.bucket}/{join_s3_key(_TOOL_MANAGED_OUTPUT_PREFIX, name)}"
         parse_s3_uri(output_s3_uri)
 
         request = build_start_entities_request(
@@ -114,7 +115,7 @@ class AwsComprehend(AsyncTool):
             language_code=language_code,
             input_format=input_format,
             job_name=name,
-            entity_recognizer_arn=entity_recognizer_arn,
+            entity_recognizer_arn=self.entity_recognizer_arn,
             output_kms_key_id=self.output_kms_key_id,
             volume_kms_key_id=self.volume_kms_key_id,
             tags=tags,
@@ -123,18 +124,12 @@ class AwsComprehend(AsyncTool):
         logging.info("Starting AWS Comprehend entities job %s", name)
         logging.debug("AWS Comprehend request: %s", json.dumps(request, default=str, sort_keys=True))
         response = self.comprehend_client.start_entities_detection_job(**request)
-        job_id = response["JobId"]
-        self._job_meta_by_id[job_id] = _AwsJobMeta(
-            delete_output=delete_output,
-            owned_output=owned_output,
-            include_tool_private=include_tool_private,
-        )
-        return job_id
+        return response["JobId"]
 
     def get_status(self, job_id: str, details: bool = True) -> AsyncJobStatus:
         """Return normalized status information for an AWS Comprehend job."""
         raw_job = self._get_job(job_id)
-        return _status_from_job_data(raw_job["EntitiesDetectionJobProperties"])
+        return _status_from_job_data(raw_job["EntitiesDetectionJobProperties"], details=details)
 
     def list_jobs(self) -> list[AsyncJobStatus]:
         """Return AWS Comprehend entity jobs matching this instance's job-name prefix."""
@@ -154,7 +149,7 @@ class AwsComprehend(AsyncTool):
     def get_result(self, job_id: str) -> ToolOutput | None:
         """Return a transitional AMPAV `ToolOutput` when the batch job is ready."""
         raw_job = self._get_job(job_id)
-        status = _status_from_job_data(raw_job["EntitiesDetectionJobProperties"])
+        status = _status_from_job_data(raw_job["EntitiesDetectionJobProperties"], details=False)
         if not status.is_done:
             return None
 
@@ -165,18 +160,16 @@ class AwsComprehend(AsyncTool):
 
         native = self._get_native_result(raw_job)
         output = self._to_tool_output(job_id, native)
-        self._delete_output_if_needed(job_id, raw_job)
-        self._delete_state(job_id)
+        self._delete_output_if_needed(raw_job)
         return output
 
     def cleanup(self, job_id: str) -> None:
         """Stop active jobs where possible, delete owned/requested output, and clear state."""
         raw_job = self._get_job_or_none(job_id)
         if raw_job is None:
-            self._delete_state(job_id)
             return
 
-        status = _status_from_job_data(raw_job["EntitiesDetectionJobProperties"])
+        status = _status_from_job_data(raw_job["EntitiesDetectionJobProperties"], details=False)
         if not status.is_done:
             self.comprehend_client.stop_entities_detection_job(JobId=job_id)
 
@@ -187,12 +180,10 @@ class AwsComprehend(AsyncTool):
             time.sleep(self.polling_interval)
             raw_job = self._get_job_or_none(job_id)
             if raw_job is None:
-                self._delete_state(job_id)
                 return
-            status = _status_from_job_data(raw_job["EntitiesDetectionJobProperties"])
+            status = _status_from_job_data(raw_job["EntitiesDetectionJobProperties"], details=False)
 
-        self._delete_output_if_needed(job_id, raw_job)
-        self._delete_state(job_id)
+        self._delete_output_if_needed(raw_job)
 
     def process(
         self,
@@ -236,7 +227,7 @@ class AwsComprehend(AsyncTool):
 
     def _to_tool_output(self, job_id: str, result: AwsComprehendResult) -> ToolOutput:
         output = self.native_to_tool_output(result)
-        if self._job_meta_by_id.get(job_id, _AwsJobMeta()).include_tool_private:
+        if self.include_tool_private:
             output.tool_private = {
                 "aws_comprehend_result": result.model_dump(mode="json"),
                 "raw_comprehend_job": result.raw_job,
@@ -274,22 +265,15 @@ class AwsComprehend(AsyncTool):
             records=records,
         )
 
-    def _delete_output_if_needed(self, job_id: str, raw_job: dict[str, Any]) -> None:
-        if not self._should_delete_output(job_id):
-            return
+    def _delete_output_if_needed(self, raw_job: dict[str, Any]) -> None:
         output_s3_uri = get_output_s3_uri_or_none(raw_job)
         if not output_s3_uri:
+            return
+        if not (self.delete_user_owned_outputs or is_tool_managed_output_uri(output_s3_uri)):
             return
         output_location = parse_s3_uri(output_s3_uri)
         if output_location.key.endswith(".tar.gz"):
             self.s3_client.delete_object(Bucket=output_location.bucket, Key=output_location.key)
-
-    def _should_delete_output(self, job_id: str) -> bool:
-        meta = self._job_meta_by_id.get(job_id)
-        return bool(meta and (meta.delete_output or meta.owned_output))
-
-    def _delete_state(self, job_id: str) -> None:
-        self._job_meta_by_id.pop(job_id, None)
 
 
 def build_start_entities_request(
@@ -359,9 +343,24 @@ def get_output_s3_uri(raw_job: dict[str, Any]) -> str:
 
 def get_output_s3_uri_or_none(raw_job: dict[str, Any]) -> str | None:
     job_data = raw_job.get("EntitiesDetectionJobProperties") or {}
+    return get_output_s3_uri_from_job_data(job_data)
+
+
+def get_output_s3_uri_from_job_data(job_data: dict[str, Any]) -> str | None:
     output_config = job_data.get("OutputDataConfig") or {}
     output_s3_uri = output_config.get("S3Uri")
     return output_s3_uri if isinstance(output_s3_uri, str) else None
+
+
+def get_input_s3_uri_or_none(job_data: dict[str, Any]) -> str | None:
+    input_config = job_data.get("InputDataConfig") or {}
+    input_s3_uri = input_config.get("S3Uri")
+    return input_s3_uri if isinstance(input_s3_uri, str) else None
+
+
+def is_tool_managed_output_uri(output_s3_uri: str) -> bool:
+    location = parse_s3_uri(output_s3_uri)
+    return location.key.startswith(f"{_TOOL_MANAGED_OUTPUT_PREFIX}/")
 
 
 def build_job_name(source: str | Path, prefix: str, timestamp: str) -> str:
@@ -394,13 +393,21 @@ def json_safe(data: Any) -> Any:
     return json.loads(json.dumps(data, default=str))
 
 
-def _status_from_job_data(job_data: dict[str, Any]) -> AsyncJobStatus:
+def _status_from_job_data(job_data: dict[str, Any], *, details: bool = True) -> AsyncJobStatus:
     aws_status = job_data["JobStatus"]
     message = job_data.get("Message")
-    return AsyncJobStatus(
-        job_id=job_data["JobId"],
-        status=map_aws_comprehend_status(aws_status),
-        message=message,
+    status_data = {
+        "job_id": job_data["JobId"],
+        "status": map_aws_comprehend_status(aws_status),
+        "message": message,
+    }
+    if not details:
+        return AsyncJobStatus(**status_data)
+    return AwsJobStatus(
+        **status_data,
+        job_name=job_data.get("JobName"),
+        input_s3_uri=get_input_s3_uri_or_none(job_data),
+        output_s3_uri=get_output_s3_uri_from_job_data(job_data),
     )
 
 

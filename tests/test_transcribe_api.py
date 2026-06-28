@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ampav.core.async_tool import AsyncStatusCode
 
+from ampav.aws.job import AwsJobStatus
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 from ampav_aws_cli.transcribe import build_cli_parser
 from ampav_aws_utils.s3_files import upload_file
@@ -88,7 +89,7 @@ class AwsTranscribeApiTest(unittest.TestCase):
             "s3://input/audio.wav",
             output_s3_uri="s3://out/result.json",
             job_name_suffix="test-job",
-            transcription=TranscriptionSettings(media_format="wav"),
+            transcription_settings=TranscriptionSettings(media_format="wav"),
         )
 
         self.assertTrue(job.startswith("ampav-aws-transcribe-"))
@@ -105,7 +106,7 @@ class AwsTranscribeApiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.submit(
                 "https://example.com/audio.wav",
-                transcription=TranscriptionSettings(media_format="wav"),
+                transcription_settings=TranscriptionSettings(media_format="wav"),
             )
 
         self.assertEqual(transcribe.started, [])
@@ -132,23 +133,28 @@ class AwsTranscribeApiTest(unittest.TestCase):
             "s3://input/audio.wav",
             output_s3_uri="s3://out/result.json",
             job_name_suffix="test-job",
-            transcription=TranscriptionSettings(media_format="wav"),
+            transcription_settings=TranscriptionSettings(media_format="wav"),
         )
 
         status = client.get_status(job)
 
+        self.assertIsInstance(status, AwsJobStatus)
         self.assertEqual(status.status, AsyncStatusCode.SUCCEEDED)
         self.assertEqual(status.job_id, job)
+        self.assertEqual(status.job_name, job)
+        self.assertEqual(status.input_s3_uri, "s3://input/audio.wav")
+        self.assertEqual(status.output_s3_uri, "s3://out/result.json")
 
     def test_process_s3_uri_returns_tool_output_with_private_raw_data(self) -> None:
-        client, transcribe, _ = self.make_client()
+        transcribe = FakeTranscribeClient()
+        s3 = FakeS3Client()
+        client = AwsTranscribe(transcribe_client=transcribe, s3_client=s3, include_tool_private=True)
 
         output = client.process(
             "s3://input/audio.wav",
             output_s3_uri="s3://out/result.json",
             job_name_suffix="test-job",
-            include_tool_private=True,
-            transcription=TranscriptionSettings(media_format="wav"),
+            transcription_settings=TranscriptionSettings(media_format="wav"),
         )
 
         self.assertEqual(output.output.text, "Please open the door.")
@@ -168,19 +174,24 @@ class AwsTranscribeApiTest(unittest.TestCase):
             "s3://input/audio.wav",
             output_s3_uri="s3://out/result.json",
             job_name_suffix="public-output",
-            transcription=TranscriptionSettings(media_format="wav"),
+            transcription_settings=TranscriptionSettings(media_format="wav"),
         )
 
         self.assertIsNone(output.tool_private)
 
     def test_cleanup_deletes_requested_output_and_job(self) -> None:
-        client, transcribe, s3 = self.make_client()
+        transcribe = FakeTranscribeClient()
+        s3 = FakeS3Client()
+        client = AwsTranscribe(
+            transcribe_client=transcribe,
+            s3_client=s3,
+            delete_user_owned_outputs=True,
+        )
         job = client.submit(
             "s3://input/audio.wav",
             output_s3_uri="s3://out/result.json",
-            delete_output=True,
             job_name_suffix="cleanup-job",
-            transcription=TranscriptionSettings(media_format="wav"),
+            transcription_settings=TranscriptionSettings(media_format="wav"),
         )
 
         client.cleanup(job)
@@ -196,7 +207,7 @@ class AwsTranscribeApiTest(unittest.TestCase):
                 "s3://out/result.json",
                 "--region",
                 "us-east-2",
-                "--delete-output",
+                "--delete-user-owned-outputs",
                 "--job-name-suffix",
                 "demo",
                 "--include-tool-private",
@@ -206,7 +217,7 @@ class AwsTranscribeApiTest(unittest.TestCase):
         self.assertEqual(args.media, "s3://input/audio.wav")
         self.assertEqual(args.output_s3_uri, "s3://out/result.json")
         self.assertEqual(args.region, "us-east-2")
-        self.assertTrue(args.delete_output)
+        self.assertTrue(args.delete_user_owned_outputs)
         self.assertEqual(args.job_name_suffix, "demo")
         self.assertTrue(args.include_tool_private)
 

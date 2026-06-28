@@ -35,6 +35,8 @@ class AwsTranscribeLiveTest(unittest.TestCase):
         client = AwsTranscribe(
             region_name=aws_config.get("region"),
             profile_name=aws_config.get("profile_name"),
+            delete_user_owned_outputs=True,
+            include_tool_private=True,
             polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
             timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
         )
@@ -51,10 +53,8 @@ class AwsTranscribeLiveTest(unittest.TestCase):
             output = client.process(
                 input_location.uri,
                 output_s3_uri=f"s3://{output_bucket}/{s3_config.get('output_prefix', 'aws_transcribe/output').strip('/')}/opendoor-live.json",
-                delete_output=True,
                 job_name_suffix=job_name_suffix,
-                include_tool_private=True,
-                transcription=TranscriptionSettings(**transcription_config),
+                transcription_settings=TranscriptionSettings(**transcription_config),
             )
         finally:
             client.s3_client.delete_object(Bucket=input_location.bucket, Key=input_location.key)

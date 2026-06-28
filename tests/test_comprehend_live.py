@@ -38,6 +38,8 @@ class AwsComprehendLiveTest(unittest.TestCase):
             region_name=aws_config.get("region"),
             profile_name=aws_config.get("profile_name"),
             data_access_role_arn=role_arn,
+            delete_user_owned_outputs=True,
+            include_tool_private=True,
             polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
             timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
         )
@@ -58,11 +60,9 @@ class AwsComprehendLiveTest(unittest.TestCase):
             result = client.process(
                 input_location.uri,
                 output_s3_uri=output_s3_uri,
-                delete_output=True,
                 language_code=comprehend_config.get("language_code", "en"),
                 input_format=comprehend_config.get("input_format", "ONE_DOC_PER_FILE"),
                 job_name_suffix=job_name_suffix,
-                include_tool_private=True,
             )
         finally:
             client.s3_client.delete_object(Bucket=input_location.bucket, Key=input_location.key)

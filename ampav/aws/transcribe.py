@@ -16,8 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import ToolOutput
 
-from ._job import _AwsJobMeta
 from .errors import AwsTranscribeError, AwsTranscriptSchemaError
+from .job import AwsJobStatus
 from .s3 import S3Location, parse_s3_uri
 from .transcribe_contract import validate_aws_transcript_contract
 from .transcribe_conversion import aws_transcript_to_transcript
@@ -64,6 +64,8 @@ class AwsTranscribe(AsyncTool):
         session: Any | None = None,
         transcribe_client: Any | None = None,
         s3_client: Any | None = None,
+        delete_user_owned_outputs: bool = False,
+        include_tool_private: bool = False,
         polling_interval: float = 30,
         timeout: float | None = 7200,
     ):
@@ -77,48 +79,42 @@ class AwsTranscribe(AsyncTool):
             session = boto3.Session(region_name=region_name, profile_name=profile_name)
         self.transcribe_client = transcribe_client or session.client("transcribe")
         self.s3_client = s3_client or session.client("s3")
+        self.delete_user_owned_outputs = delete_user_owned_outputs
+        self.include_tool_private = include_tool_private
         self.polling_interval = polling_interval
         self.timeout = timeout
-        self._job_meta_by_id: dict[str, _AwsJobMeta] = {}
 
     def submit(
         self,
         input_s3_uri: str,
         *,
         output_s3_uri: str | None = None,
-        delete_output: bool = False,
         job_name_suffix: str | None = None,
-        include_tool_private: bool = False,
-        transcription: TranscriptionSettings | None = None,
+        transcription_settings: TranscriptionSettings | None = None,
     ) -> str:
         """Submit an AWS Transcribe job for media that already exists in S3."""
         parse_s3_uri(input_s3_uri)
         output_location = parse_s3_uri(output_s3_uri) if output_s3_uri else None
-        transcription = transcription or TranscriptionSettings()
+        transcription_settings = transcription_settings or TranscriptionSettings()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         job_id = build_job_name(job_name_suffix or input_s3_uri, _JOB_NAME_PREFIX, timestamp)
         request = build_start_job_request(
             job_name=job_id,
             input_s3_uri=input_s3_uri,
             output_location=output_location,
-            transcription=transcription,
+            transcription_settings=transcription_settings,
         )
 
         logging.info("Starting AWS Transcribe job %s", job_id)
         logging.debug("AWS Transcribe request: %s", json.dumps(request, default=str, sort_keys=True))
         self.transcribe_client.start_transcription_job(**request)
-        self._job_meta_by_id[job_id] = _AwsJobMeta(
-            delete_output=delete_output,
-            owned_output=False,
-            include_tool_private=include_tool_private,
-        )
         return job_id
 
     def get_status(self, job_id: str, details: bool = True) -> AsyncJobStatus:
         """Return normalized status information for an AWS Transcribe job."""
         raw_job = self._get_job(job_id)
         job_data = raw_job["TranscriptionJob"]
-        return _status_from_job_data(job_data)
+        return _status_from_job_data(job_data, details=details)
 
     def list_jobs(self) -> list[AsyncJobStatus]:
         """Return AWS Transcribe jobs matching this instance's job-name prefix."""
@@ -145,7 +141,7 @@ class AwsTranscribe(AsyncTool):
         """Return AMPAV output when ready; terminal jobs are cleaned up."""
         raw_job = self._get_job(job_id)
         job_data = raw_job["TranscriptionJob"]
-        status = _status_from_job_data(job_data)
+        status = _status_from_job_data(job_data, details=False)
         if not status.is_done:
             return None
 
@@ -156,19 +152,17 @@ class AwsTranscribe(AsyncTool):
 
         raw_transcript = self._read_transcript_json(job_data)
         output = self._to_tool_output(job_id, raw_job, raw_transcript)
-        self._delete_output_if_needed(job_id, raw_job)
+        self._delete_output_if_needed(raw_job)
         self._delete_job_record(job_id)
-        self._delete_meta(job_id)
         return output
 
     def cleanup(self, job_id: str) -> None:
         """Clean up output owned/requested by this tool and delete the job record."""
         raw_job = self._get_job_or_none(job_id)
         if raw_job is None:
-            self._delete_meta(job_id)
             return
 
-        status = _status_from_job_data(raw_job["TranscriptionJob"])
+        status = _status_from_job_data(raw_job["TranscriptionJob"], details=False)
         started = time.monotonic()
         while not status.is_done:
             if self.timeout is not None and time.monotonic() - started > self.timeout:
@@ -176,13 +170,11 @@ class AwsTranscribe(AsyncTool):
             time.sleep(self.polling_interval)
             raw_job = self._get_job_or_none(job_id)
             if raw_job is None:
-                self._delete_meta(job_id)
                 return
-            status = _status_from_job_data(raw_job["TranscriptionJob"])
+            status = _status_from_job_data(raw_job["TranscriptionJob"], details=False)
 
-        self._delete_output_if_needed(job_id, raw_job)
+        self._delete_output_if_needed(raw_job)
         self._delete_job_record(job_id)
-        self._delete_meta(job_id)
 
     def process(
         self,
@@ -260,7 +252,7 @@ class AwsTranscribe(AsyncTool):
         job_data = raw_job.get("TranscriptionJob", {})
         parameters = tool_parameters(job_data)
         tool_private = None
-        if self._job_meta_by_id.get(job_id, _AwsJobMeta()).include_tool_private:
+        if self.include_tool_private:
             tool_private = {
                 "aws_transcribe_job": {
                     "name": job_id,
@@ -279,18 +271,14 @@ class AwsTranscribe(AsyncTool):
             tool_private=tool_private,
         )
 
-    def _delete_output_if_needed(self, job_id: str, raw_job: dict[str, Any]) -> None:
-        if not self._should_delete_output(job_id):
+    def _delete_output_if_needed(self, raw_job: dict[str, Any]) -> None:
+        if not self.delete_user_owned_outputs:
             return
         output_uri = _transcript_file_uri(raw_job.get("TranscriptionJob", {}))
         if not output_uri or not output_uri.startswith("s3://"):
             return
         location = parse_s3_uri(output_uri)
         self.s3_client.delete_object(Bucket=location.bucket, Key=location.key)
-
-    def _should_delete_output(self, job_id: str) -> bool:
-        meta = self._job_meta_by_id.get(job_id)
-        return bool(meta and (meta.delete_output or meta.owned_output))
 
     def _delete_job_record(self, job_id: str) -> None:
         try:
@@ -300,39 +288,36 @@ class AwsTranscribe(AsyncTool):
                 return
             raise
 
-    def _delete_meta(self, job_id: str) -> None:
-        self._job_meta_by_id.pop(job_id, None)
-
 
 def build_start_job_request(
     *,
     job_name: str,
     input_s3_uri: str,
     output_location: S3Location | None,
-    transcription: TranscriptionSettings,
+    transcription_settings: TranscriptionSettings,
 ) -> dict[str, Any]:
     """Build a boto3 `start_transcription_job` request body."""
     request: dict[str, Any] = {
         "TranscriptionJobName": job_name,
         "Media": {"MediaFileUri": input_s3_uri},
-        "MediaFormat": transcription.media_format or infer_media_format(input_s3_uri),
+        "MediaFormat": transcription_settings.media_format or infer_media_format(input_s3_uri),
     }
 
     if output_location is not None:
         request["OutputBucketName"] = output_location.bucket
         request["OutputKey"] = output_location.key
 
-    if transcription.identify_language:
+    if transcription_settings.identify_language:
         request["IdentifyLanguage"] = True
-        if transcription.language_options:
-            request["LanguageOptions"] = transcription.language_options
+        if transcription_settings.language_options:
+            request["LanguageOptions"] = transcription_settings.language_options
     else:
-        request["LanguageCode"] = transcription.language_code
+        request["LanguageCode"] = transcription_settings.language_code
 
-    if transcription.show_speaker_labels:
+    if transcription_settings.show_speaker_labels:
         request["Settings"] = {
             "ShowSpeakerLabels": True,
-            "MaxSpeakerLabels": transcription.max_speaker_labels,
+            "MaxSpeakerLabels": transcription_settings.max_speaker_labels,
         }
 
     return request
@@ -392,14 +377,27 @@ def json_safe(data: Any) -> Any:
     return json.loads(json.dumps(data, default=str))
 
 
-def _status_from_job_data(job_data: dict[str, Any]) -> AsyncJobStatus:
+def _status_from_job_data(job_data: dict[str, Any], *, details: bool = True) -> AsyncJobStatus:
     aws_status = job_data["TranscriptionJobStatus"]
     failure_reason = job_data.get("FailureReason")
-    return AsyncJobStatus(
-        job_id=job_data["TranscriptionJobName"],
-        status=map_aws_transcribe_status(aws_status),
-        message=failure_reason,
+    status_data = {
+        "job_id": job_data["TranscriptionJobName"],
+        "status": map_aws_transcribe_status(aws_status),
+        "message": failure_reason,
+    }
+    if not details:
+        return AsyncJobStatus(**status_data)
+    return AwsJobStatus(
+        **status_data,
+        job_name=job_data["TranscriptionJobName"],
+        input_s3_uri=_media_file_uri(job_data),
+        output_s3_uri=_transcript_file_uri(job_data),
     )
+
+
+def _media_file_uri(job_data: dict[str, Any]) -> str | None:
+    uri = job_data.get("Media", {}).get("MediaFileUri")
+    return uri if isinstance(uri, str) else None
 
 
 def _transcript_file_uri(job_data: dict[str, Any]) -> str | None:

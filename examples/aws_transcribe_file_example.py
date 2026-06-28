@@ -31,6 +31,8 @@ def main() -> None:
     client = AwsTranscribe(
         region_name=aws_config.get("region"),
         profile_name=aws_config.get("profile_name"),
+        delete_user_owned_outputs=bool(s3_config.get("delete_user_owned_outputs", False)),
+        include_tool_private=bool(s3_config.get("include_tool_private", False)),
         polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
         timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
     )
@@ -46,10 +48,8 @@ def main() -> None:
         result = client.process(
             input_location.uri,
             output_s3_uri=s3_config.get("output_s3_uri"),
-            delete_output=bool(s3_config.get("delete_output", False)),
             job_name_suffix=transcription_config.pop("job_name_suffix", INPUT_FILE.stem),
-            include_tool_private=False,
-            transcription=TranscriptionSettings(**transcription_config),
+            transcription_settings=TranscriptionSettings(**transcription_config),
         )
     finally:
         if not s3_config.get("keep_uploaded_input", False):

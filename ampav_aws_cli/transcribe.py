@@ -20,7 +20,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transcribe media with AWS Transcribe and print AMPAV ToolOutput YAML.")
     parser.add_argument("media", help="Local media path or s3://bucket/key media URI")
     parser.add_argument("--output-s3-uri", help="Optional exact s3://bucket/key transcript output location")
-    parser.add_argument("--delete-output", action="store_true", help="Delete caller-supplied S3 output after reading it")
+    parser.add_argument(
+        "--delete-user-owned-outputs",
+        action="store_true",
+        help="Delete caller-supplied S3 output after reading it",
+    )
     parser.add_argument("--input-bucket", help="S3 bucket for uploading a local media file")
     parser.add_argument("--input-key", help="S3 key for uploading a local media file")
     parser.add_argument("--input-prefix", default="aws_transcribe/input", help="S3 prefix for generated input keys")
@@ -57,6 +61,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     aws = AwsTranscribe(
         region_name=args.region,
         profile_name=args.profile,
+        delete_user_owned_outputs=args.delete_user_owned_outputs,
+        include_tool_private=args.include_tool_private,
         polling_interval=args.poll_interval,
         timeout=args.timeout,
     )
@@ -74,10 +80,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = aws.process(
             input_s3_uri,
             output_s3_uri=args.output_s3_uri,
-            delete_output=args.delete_output,
             job_name_suffix=args.job_name_suffix,
-            include_tool_private=args.include_tool_private,
-            transcription=transcription,
+            transcription_settings=transcription,
         )
     except Exception as exc:
         cli_errors = (ToolError, BotoCoreError, ClientError, OSError, ValueError)

@@ -8,6 +8,7 @@ from ampav.core.async_tool import AsyncStatusCode
 
 from ampav.aws.comprehend import AwsComprehend, parse_output_archive
 from ampav.aws.errors import AwsComprehendError
+from ampav.aws.job import AwsJobStatus
 
 
 class FakeBody:
@@ -34,6 +35,8 @@ class FakeComprehendClient:
 
     def start_entities_detection_job(self, **request: object) -> dict:
         self.started.append(request)
+        output_s3_uri = request["OutputDataConfig"]["S3Uri"]
+        self.output_s3_uri = f"{str(output_s3_uri).rstrip('/')}/job/output.tar.gz"
         return {"JobId": "job-123", "JobArn": "arn:aws:comprehend:us-east-2:123:entities-detection-job/job-123"}
 
     def describe_entities_detection_job(self, JobId: str) -> dict:
@@ -146,6 +149,7 @@ class AwsComprehendApiTest(unittest.TestCase):
             data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
             output_kms_key_id="arn:aws:kms:us-east-2:123456789012:key/output",
             volume_kms_key_id="arn:aws:kms:us-east-2:123456789012:key/volume",
+            entity_recognizer_arn="arn:aws:comprehend:us-east-2:123456789012:entity-recognizer/test",
         )
 
         client.submit("s3://in/input.txt", output_s3_uri="s3://out/output")
@@ -153,6 +157,10 @@ class AwsComprehendApiTest(unittest.TestCase):
         request = comprehend.started[0]
         self.assertEqual(request["OutputDataConfig"]["KmsKeyId"], "arn:aws:kms:us-east-2:123456789012:key/output")
         self.assertEqual(request["VolumeKmsKeyId"], "arn:aws:kms:us-east-2:123456789012:key/volume")
+        self.assertEqual(
+            request["EntityRecognizerArn"],
+            "arn:aws:comprehend:us-east-2:123456789012:entity-recognizer/test",
+        )
 
     def test_submit_requires_role_arn(self) -> None:
         comprehend = FakeComprehendClient()
@@ -170,16 +178,26 @@ class AwsComprehendApiTest(unittest.TestCase):
 
         status = client.get_status(job_id)
 
+        self.assertIsInstance(status, AwsJobStatus)
         self.assertEqual(status.status, AsyncStatusCode.SUCCEEDED)
         self.assertEqual(status.job_id, "job-123")
+        self.assertEqual(status.job_name, "entities-test")
+        self.assertEqual(status.input_s3_uri, "s3://in/input.txt")
+        self.assertEqual(status.output_s3_uri, "s3://out/output/job/output.tar.gz")
 
     def test_get_result_reads_output_archive_into_tool_private(self) -> None:
-        client, _, _ = self.make_client()
+        comprehend = FakeComprehendClient()
+        s3 = FakeS3Client()
+        client = AwsComprehend(
+            comprehend_client=comprehend,
+            s3_client=s3,
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            include_tool_private=True,
+        )
         job_id = client.submit(
             "s3://in/input.txt",
             output_s3_uri="s3://out/output",
             job_name_suffix="entities-test",
-            include_tool_private=True,
         )
 
         result = client.get_result(job_id)
@@ -192,13 +210,20 @@ class AwsComprehendApiTest(unittest.TestCase):
         self.assertEqual(result.tool_private["raw_records"][0]["Entities"][0]["Text"], "Maya Chen")
 
     def test_process_polls_until_completion_and_returns_tool_output(self) -> None:
-        client, comprehend, _ = self.make_client(statuses=["IN_PROGRESS", "COMPLETED"])
+        comprehend = FakeComprehendClient(statuses=["IN_PROGRESS", "COMPLETED"])
+        s3 = FakeS3Client()
+        client = AwsComprehend(
+            comprehend_client=comprehend,
+            s3_client=s3,
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            include_tool_private=True,
+            polling_interval=0.001,
+        )
 
         result = client.process(
             "s3://in/input.txt",
             output_s3_uri="s3://out/output",
             job_name_suffix="entities-test",
-            include_tool_private=True,
         )
 
         self.assertEqual(result.tool_private["raw_records"][0]["Entities"][1]["Text"], "Indiana University")
@@ -222,11 +247,17 @@ class AwsComprehendApiTest(unittest.TestCase):
             client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
 
     def test_cleanup_deletes_requested_output_only(self) -> None:
-        client, _, s3 = self.make_client()
+        comprehend = FakeComprehendClient()
+        s3 = FakeS3Client()
+        client = AwsComprehend(
+            comprehend_client=comprehend,
+            s3_client=s3,
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            delete_user_owned_outputs=True,
+        )
         job_id = client.submit(
             "s3://in/input.txt",
             output_s3_uri="s3://out/output",
-            delete_output=True,
             job_name_suffix="entities-test",
         )
 
@@ -235,18 +266,42 @@ class AwsComprehendApiTest(unittest.TestCase):
         self.assertEqual(
             s3.deleted,
             [
-                ("out", "aws_comprehend/output/job/output.tar.gz"),
+                ("out", "output/job/output.tar.gz"),
             ],
         )
 
-    def test_submit_derives_owned_output_when_omitted(self) -> None:
+    def test_user_owned_output_is_kept_by_default(self) -> None:
+        client, _, s3 = self.make_client()
+        job_id = client.submit(
+            "s3://in/input.txt",
+            output_s3_uri="s3://out/output",
+            job_name_suffix="entities-test",
+        )
+
+        client.cleanup(job_id)
+
+        self.assertEqual(s3.deleted, [])
+
+    def test_submit_derives_tool_managed_output_when_omitted(self) -> None:
         client, _, _ = self.make_client()
 
         client.submit("s3://in/input.txt", job_name_suffix="entities-test")
 
         request = client.comprehend_client.started[0]
-        self.assertTrue(request["OutputDataConfig"]["S3Uri"].startswith("s3://in/aws_comprehend/output/ampav-aws-comprehend-"))
+        self.assertTrue(request["OutputDataConfig"]["S3Uri"].startswith("s3://in/aws_comprehend/_ampav_tmp/ampav-aws-comprehend-"))
         self.assertTrue(request["OutputDataConfig"]["S3Uri"].endswith("-entities-test"))
+
+    def test_tool_managed_output_is_deleted_by_default(self) -> None:
+        client, _, s3 = self.make_client()
+        job_id = client.submit("s3://in/input.txt", job_name_suffix="entities-test")
+
+        client.cleanup(job_id)
+
+        self.assertEqual(len(s3.deleted), 1)
+        bucket, key = s3.deleted[0]
+        self.assertEqual(bucket, "in")
+        self.assertTrue(key.startswith("aws_comprehend/_ampav_tmp/ampav-aws-comprehend-"))
+        self.assertTrue(key.endswith("-entities-test/job/output.tar.gz"))
 
     def test_parse_output_archive_reads_json_lines(self) -> None:
         archive = build_archive(
