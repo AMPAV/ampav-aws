@@ -1,13 +1,13 @@
 import os
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from ampav.core.async_tool import CleanupPolicy
-
 from ampav.aws.comprehend import AwsComprehend
+from ampav.aws.s3 import S3Location, join_s3_key
 
 
 SAMPLE_TEXT = (
@@ -38,29 +38,39 @@ class AwsComprehendLiveTest(unittest.TestCase):
             region_name=aws_config.get("region"),
             profile_name=aws_config.get("profile_name"),
             data_access_role_arn=role_arn,
+            delete_user_owned_outputs=True,
+            include_tool_private=True,
             polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
             timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
         )
-        input_location = client.upload_text_input(
-            SAMPLE_TEXT,
+        job_name_suffix = comprehend_config.get("job_name_suffix", "live")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        input_location = S3Location(
             bucket=bucket,
-            prefix=comprehend_config.get("input_prefix", "aws_comprehend/input"),
-            job_name_prefix=comprehend_config.get("job_name_prefix", "ampav-aws-comprehend-live"),
+            key=join_s3_key("aws_comprehend/input", f"ampav-aws-comprehend-{timestamp}.txt"),
+        )
+        client.s3_client.put_object(
+            Bucket=input_location.bucket,
+            Key=input_location.key,
+            Body=SAMPLE_TEXT.encode("utf-8"),
+            ContentType="text/plain; charset=utf-8",
         )
         output_s3_uri = f"s3://{bucket}/{comprehend_config.get('output_prefix', 'aws_comprehend/output').strip('/')}"
-        job = client.submit(
-            input_location.uri,
-            output_s3_uri=output_s3_uri,
-            language_code=comprehend_config.get("language_code", "en"),
-            input_format=comprehend_config.get("input_format", "ONE_DOC_PER_FILE"),
-            job_name_prefix=comprehend_config.get("job_name_prefix", "ampav-aws-comprehend-live"),
-        )
+        try:
+            result = client.process(
+                input_location.uri,
+                output_s3_uri=output_s3_uri,
+                language_code=comprehend_config.get("language_code", "en"),
+                input_format=comprehend_config.get("input_format", "ONE_DOC_PER_FILE"),
+                job_name_suffix=job_name_suffix,
+            )
+        finally:
+            client.s3_client.delete_object(Bucket=input_location.bucket, Key=input_location.key)
 
-        result = client.wait(job, cleanup_policy=CleanupPolicy(delete_input=True, delete_output=True))
-
-        self.assertGreaterEqual(len(result.records), 1)
-        self.assertIn("Entities", result.records[0])
-        entity_text = " ".join(entity["Text"] for entity in result.records[0]["Entities"])
+        records = result.tool_private["raw_records"]
+        self.assertGreaterEqual(len(records), 1)
+        self.assertIn("Entities", records[0])
+        entity_text = " ".join(entity["Text"] for entity in records[0]["Entities"])
         self.assertTrue(any(term in entity_text for term in {"Maya", "Indiana", "Amazon", "Seattle"}))
 
 

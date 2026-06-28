@@ -1,0 +1,34 @@
+# Example application-owned config for AWS examples.
+# Secrets are intentionally omitted; boto3 resolves credentials from profiles,
+# environment variables, credential files, or role credentials.
+
+aws:
+  region: YOUR_AWS_REGION
+  profile_name: YOUR_AWS_PROFILE
+
+s3:
+  bucket: YOUR_AWS_BUCKET
+  output_s3_uri:
+  delete_user_owned_outputs: false
+  include_tool_private: false
+  keep_uploaded_input: false
+
+polling:
+  polling_interval: 30
+  timeout: 7200
+
+transcription:
+  media_format: m4a
+  language_code: en-US
+  identify_language: false
+  language_options: []
+  show_speaker_labels: true
+  max_speaker_labels: 10
+  job_name_suffix: AMP-Intro
+
+comprehend:
+  data_access_role_arn: YOUR_COMPREHEND_DATA_ACCESS_ROLE_ARN
+  output_prefix: aws_comprehend/output
+  language_code: en
+  input_format: ONE_DOC_PER_FILE
+  job_name_suffix: AMP-Intro

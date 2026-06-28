@@ -1,27 +1,29 @@
-"""AWS Transcribe client and CLI for AMPAV."""
+"""AWS Transcribe async client for AMPAV."""
 
-import argparse
 from datetime import datetime, timezone
 import json
 import logging
-from os import PathLike
 from pathlib import Path
 import re
 import time
 from typing import Any
+from urllib.request import urlopen
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import ClientError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool, CleanupPolicy, ToolError
-from ampav.core.logging import LOG_FORMAT
+from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import ToolOutput
 
 from .errors import AwsTranscribeError, AwsTranscriptSchemaError
-from .s3 import S3Location, join_s3_key, parse_s3_uri
+from .job import AwsJobStatus
+from .s3 import S3Location, parse_s3_uri
 from .transcribe_contract import validate_aws_transcript_contract
 from .transcribe_conversion import aws_transcript_to_transcript
+
+
+_JOB_NAME_PREFIX = "ampav-aws-transcribe"
 
 
 class StrictModel(BaseModel):
@@ -47,39 +49,12 @@ class TranscriptionSettings(StrictModel):
         return self
 
 
-class AwsTranscribeJob(StrictModel):
-    """Public handle for a submitted AWS Transcribe job."""
+class AwsTranscribe(AsyncTool):
+    """Low-level AWS Transcribe client.
 
-    name: str
-    media_uri: str
-    output_bucket: str
-    output_key: str
-    media_was_uploaded: bool = False
-
-    @property
-    def output_location(self) -> S3Location:
-        """S3 location where AWS writes the transcript JSON."""
-        return S3Location(self.output_bucket, self.output_key)
-
-    @property
-    def media_location(self) -> S3Location:
-        """S3 location of the media submitted to AWS Transcribe."""
-        return parse_s3_uri(self.media_uri)
-
-
-class AwsTranscribeStatus(AsyncJobStatus):
-    """AWS Transcribe status mapped onto AMPAV async status."""
-
-    aws_status: str
-    failure_reason: str | None = None
-    transcript_file_uri: str | None = None
-
-
-class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
-    """Low-level AWS Transcribe client used by the AMPAV API and CLI."""
-
-    polling_interval: float = 30
-    timeout: float | None = 7200
+    The public lifecycle uses opaque `job_id` strings. The tool API expects
+    provider-native S3 media URIs; local file upload belongs in CLI/example code.
+    """
 
     def __init__(
         self,
@@ -89,16 +64,12 @@ class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
         session: Any | None = None,
         transcribe_client: Any | None = None,
         s3_client: Any | None = None,
+        delete_user_owned_outputs: bool = False,
+        include_tool_private: bool = False,
         polling_interval: float = 30,
         timeout: float | None = 7200,
-        cleanup_policy: CleanupPolicy | None = None,
     ):
-        """Create an AWS Transcribe client from boto3 session settings or injected clients.
-
-        `profile_name` and `region_name` are passed to boto3's normal session
-        constructor. Tests and higher-level callers may pass already-created
-        clients to avoid owning credential/session setup here.
-        """
+        """Create an AWS Transcribe client from boto3 settings or injected clients."""
         if polling_interval <= 0:
             raise ValueError("polling_interval must be greater than 0")
         if timeout is not None and timeout <= 0:
@@ -108,258 +79,245 @@ class AwsTranscribe(AsyncTool[str, AwsTranscribeJob, dict[str, Any]]):
             session = boto3.Session(region_name=region_name, profile_name=profile_name)
         self.transcribe_client = transcribe_client or session.client("transcribe")
         self.s3_client = s3_client or session.client("s3")
+        self.delete_user_owned_outputs = delete_user_owned_outputs
+        self.include_tool_private = include_tool_private
         self.polling_interval = polling_interval
         self.timeout = timeout
-        if cleanup_policy is not None:
-            self.cleanup_policy = cleanup_policy
 
     def submit(
         self,
-        media_uri: str,
+        input_s3_uri: str,
         *,
-        output_bucket: str,
-        output_key: str | None = None,
-        output_prefix: str = "aws_transcribe/output",
-        job_name: str | None = None,
-        job_name_prefix: str = "ampav-aws-transcribe",
-        transcription: TranscriptionSettings | None = None,
-    ) -> AwsTranscribeJob:
-        """Submit an AWS Transcribe job for media that already exists in S3.
-
-        The returned `AwsTranscribeJob` is the public handle callers can store,
-        poll, fetch, or clean up later.
-        """
-        parse_s3_uri(media_uri)
-        transcription = transcription or TranscriptionSettings()
+        output_s3_uri: str | None = None,
+        job_name_suffix: str | None = None,
+        transcription_settings: TranscriptionSettings | None = None,
+    ) -> str:
+        """Submit an AWS Transcribe job for media that already exists in S3."""
+        parse_s3_uri(input_s3_uri)
+        output_location = parse_s3_uri(output_s3_uri) if output_s3_uri else None
+        transcription_settings = transcription_settings or TranscriptionSettings()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        job_name = job_name or build_job_name(media_uri, job_name_prefix, timestamp)
-        output_key = output_key or join_s3_key(output_prefix, f"{job_name}.json")
+        job_id = build_job_name(job_name_suffix or input_s3_uri, _JOB_NAME_PREFIX, timestamp)
         request = build_start_job_request(
-            job_name=job_name,
-            media_uri=media_uri,
-            output_bucket=output_bucket,
-            output_key=output_key,
-            transcription=transcription,
+            job_name=job_id,
+            input_s3_uri=input_s3_uri,
+            output_location=output_location,
+            transcription_settings=transcription_settings,
         )
 
-        logging.info("Starting AWS Transcribe job %s", job_name)
+        logging.info("Starting AWS Transcribe job %s", job_id)
         logging.debug("AWS Transcribe request: %s", json.dumps(request, default=str, sort_keys=True))
         self.transcribe_client.start_transcription_job(**request)
-        return AwsTranscribeJob(
-            name=job_name,
-            media_uri=media_uri,
-            output_bucket=output_bucket,
-            output_key=output_key,
-        )
+        return job_id
 
-    def upload_media(
-        self,
-        audiofile: str | PathLike[str],
-        *,
-        bucket: str,
-        key: str | None = None,
-        prefix: str = "aws_transcribe/input",
-        job_name: str | None = None,
-        job_name_prefix: str = "ampav-aws-transcribe",
-    ) -> S3Location:
-        """Upload a local media file to S3 and return its S3 location."""
-        audio_path = Path(audiofile).expanduser().resolve()
-        if not audio_path.exists():
-            raise FileNotFoundError(f"Input audio file does not exist: {audio_path}")
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        job_name = job_name or build_job_name(str(audio_path), job_name_prefix, timestamp)
-        key = key or join_s3_key(prefix, f"{job_name}{audio_path.suffix}")
-        input_location = S3Location(bucket, key)
-
-        logging.info("Uploading %s to %s", audio_path, input_location.uri)
-        self.s3_client.upload_file(str(audio_path), input_location.bucket, input_location.key)
-        return input_location
-
-    def get_job(self, job: AwsTranscribeJob) -> dict[str, Any]:
-        """Return AWS metadata for a submitted transcription job."""
-        return self.transcribe_client.get_transcription_job(TranscriptionJobName=job.name)
-
-    def get_status(self, job: AwsTranscribeJob) -> AwsTranscribeStatus:
+    def get_status(self, job_id: str, details: bool = True) -> AsyncJobStatus:
         """Return normalized status information for an AWS Transcribe job."""
-        response = self.get_job(job)
-        job_data = response["TranscriptionJob"]
-        aws_status = job_data["TranscriptionJobStatus"]
-        failure_reason = job_data.get("FailureReason")
-        return AwsTranscribeStatus(
-            job_id=job.name,
-            status=map_aws_transcribe_status(aws_status),
-            message=failure_reason,
-            aws_status=aws_status,
-            failure_reason=failure_reason,
-            transcript_file_uri=job_data.get("Transcript", {}).get("TranscriptFileUri"),
-        )
+        raw_job = self._get_job(job_id)
+        job_data = raw_job["TranscriptionJob"]
+        return _status_from_job_data(job_data, details=details)
 
-    def list_jobs(self, **kwargs: Any) -> dict[str, Any]:
-        """Return AWS Transcribe job summaries using boto3 list arguments."""
-        return self.transcribe_client.list_transcription_jobs(**kwargs)
+    def list_jobs(self) -> list[AsyncJobStatus]:
+        """Return AWS Transcribe jobs matching this instance's job-name prefix."""
+        response = self.transcribe_client.list_transcription_jobs(JobNameContains=_JOB_NAME_PREFIX)
+        summaries = response.get("TranscriptionJobSummaries", [])
+        statuses: list[AsyncJobStatus] = []
+        for summary in summaries:
+            job_id = summary.get("TranscriptionJobName")
+            aws_status = summary.get("TranscriptionJobStatus")
+            if not isinstance(job_id, str) or not isinstance(aws_status, str):
+                continue
+            if not job_id.startswith(_JOB_NAME_PREFIX):
+                continue
+            statuses.append(
+                AsyncJobStatus(
+                    job_id=job_id,
+                    status=map_aws_transcribe_status(aws_status),
+                    message=summary.get("FailureReason"),
+                )
+            )
+        return statuses
 
-    def get_external_result(self, job: AwsTranscribeJob) -> dict[str, Any] | None:
-        """Return raw AWS transcript JSON when the job has succeeded."""
-        status = self.get_status(job)
-        if status.status != AsyncStatusCode.SUCCEEDED:
+    def get_result(self, job_id: str) -> ToolOutput | None:
+        """Return AMPAV output when ready; terminal jobs are cleaned up."""
+        raw_job = self._get_job(job_id)
+        job_data = raw_job["TranscriptionJob"]
+        status = _status_from_job_data(job_data, details=False)
+        if not status.is_done:
             return None
 
-        logging.info("Reading raw AWS transcript from %s", job.output_location.uri)
-        response = self.s3_client.get_object(Bucket=job.output_bucket, Key=job.output_key)
-        with response["Body"] as body:
-            transcript = json.loads(body.read().decode("utf-8"))
+        if status.status != AsyncStatusCode.SUCCEEDED:
+            self.cleanup(job_id)
+            reason = status.message or "no failure reason returned"
+            raise AwsTranscribeError(job_id, f"failed: {reason}")
+
+        raw_transcript = self._read_transcript_json(job_data)
+        output = self._to_tool_output(job_id, raw_job, raw_transcript)
+        self._delete_output_if_needed(raw_job)
+        self._delete_job_record(job_id)
+        return output
+
+    def cleanup(self, job_id: str) -> None:
+        """Clean up output owned/requested by this tool and delete the job record."""
+        raw_job = self._get_job_or_none(job_id)
+        if raw_job is None:
+            return
+
+        status = _status_from_job_data(raw_job["TranscriptionJob"], details=False)
+        started = time.monotonic()
+        while not status.is_done:
+            if self.timeout is not None and time.monotonic() - started > self.timeout:
+                raise AwsTranscribeError(job_id, f"cleanup did not finish within {self.timeout} seconds")
+            time.sleep(self.polling_interval)
+            raw_job = self._get_job_or_none(job_id)
+            if raw_job is None:
+                return
+            status = _status_from_job_data(raw_job["TranscriptionJob"], details=False)
+
+        self._delete_output_if_needed(raw_job)
+        self._delete_job_record(job_id)
+
+    def process(
+        self,
+        input_s3_uri: str,
+        **kwargs: Any,
+    ) -> ToolOutput:
+        """Submit a Transcribe job, wait for completion, clean up, and return output."""
+        job_id = self.submit(input_s3_uri, **kwargs)
+        started = time.monotonic()
+        while not self.is_done(job_id):
+            logging.info("AWS Transcribe job %s is still running", job_id)
+            if self.timeout is not None and time.monotonic() - started > self.timeout:
+                self.cleanup(job_id)
+                raise AwsTranscribeError(job_id, f"did not finish within {self.timeout} seconds")
+            time.sleep(self.polling_interval)
+
+        result = self.get_result(job_id)
+        if result is None:
+            raise AwsTranscribeError(job_id, "finished without an available transcript")
+        return result
+
+    @staticmethod
+    def native_to_tool_output(native: Any) -> ToolOutput:
+        """Convert native AWS transcript JSON into an AMPAV `ToolOutput`."""
+        if not isinstance(native, dict):
+            raise AwsTranscriptSchemaError("$", "AWS transcript JSON must contain an object")
+        aws_model = validate_aws_transcript_contract(native)
+        transcript = aws_transcript_to_transcript(aws_model)
+        return ToolOutput(
+            tool_name="aws_transcribe",
+            output=transcript,
+        )
+
+    def _get_job(self, job_id: str) -> dict[str, Any]:
+        try:
+            return self.transcribe_client.get_transcription_job(TranscriptionJobName=job_id)
+        except ClientError as exc:
+            if _is_not_found_error(exc):
+                raise KeyError(job_id) from exc
+            raise
+
+    def _get_job_or_none(self, job_id: str) -> dict[str, Any] | None:
+        try:
+            return self._get_job(job_id)
+        except KeyError:
+            return None
+
+    def _read_transcript_json(self, job_data: dict[str, Any]) -> dict[str, Any]:
+        transcript_uri = job_data.get("Transcript", {}).get("TranscriptFileUri")
+        if not isinstance(transcript_uri, str):
+            raise AwsTranscribeError(job_data.get("TranscriptionJobName"), "completed job did not include transcript URI")
+
+        logging.info("Reading raw AWS transcript from %s", transcript_uri)
+        if transcript_uri.startswith("s3://"):
+            location = parse_s3_uri(transcript_uri)
+            response = self.s3_client.get_object(Bucket=location.bucket, Key=location.key)
+            with response["Body"] as body:
+                transcript = json.loads(body.read().decode("utf-8"))
+        else:
+            with urlopen(transcript_uri) as response:
+                transcript = json.loads(response.read().decode("utf-8"))
+
         if not isinstance(transcript, dict):
             raise AwsTranscriptSchemaError("$", "AWS transcript JSON must contain an object")
         return transcript
 
-    def to_tool_output(self, job: AwsTranscribeJob, result: dict[str, Any]) -> ToolOutput:
-        """Convert raw AWS transcript JSON into an AMPAV `ToolOutput`.
-
-        Raw AWS job and transcript payloads are stored in `tool_private` for
-        troubleshooting. Normal clients should consume `output`.
-        """
-        final_job = self.get_job(job)
-        aws_model = validate_aws_transcript_contract(result)
+    def _to_tool_output(
+        self,
+        job_id: str,
+        raw_job: dict[str, Any],
+        raw_transcript: dict[str, Any],
+    ) -> ToolOutput:
+        aws_model = validate_aws_transcript_contract(raw_transcript)
         transcript = aws_transcript_to_transcript(aws_model)
-        job_data = final_job.get("TranscriptionJob", {})
+        job_data = raw_job.get("TranscriptionJob", {})
+        parameters = tool_parameters(job_data)
+        tool_private = None
+        if self.include_tool_private:
+            tool_private = {
+                "aws_transcribe_job": {
+                    "name": job_id,
+                },
+                "raw_transcription_job": json_safe(raw_job),
+                "raw_transcript": json_safe(raw_transcript),
+            }
 
-        output = ToolOutput(
+        return ToolOutput(
             tool_name="aws_transcribe",
-            parameters=tool_parameters(job, job_data),
+            parameters=parameters,
             queue_time=timestamp_or_none(job_data.get("CreationTime")),
             start_time=timestamp_or_none(job_data.get("StartTime")) or timestamp_or_none(job_data.get("CreationTime")),
             end_time=timestamp_or_none(job_data.get("CompletionTime")) or time.time(),
             output=transcript,
-            tool_private={
-                "aws_transcribe_job": job.model_dump(mode="json"),
-                "raw_transcription_job": json_safe(final_job),
-                "raw_transcript": json_safe(result),
-            },
+            tool_private=tool_private,
         )
-        return output
 
-    def cleanup(
-        self,
-        job: AwsTranscribeJob,
-        cleanup_policy: CleanupPolicy | None = None,
-    ) -> None:
-        """Delete selected AWS-side job/S3 resources.
+    def _delete_output_if_needed(self, raw_job: dict[str, Any]) -> None:
+        if not self.delete_user_owned_outputs:
+            return
+        output_uri = _transcript_file_uri(raw_job.get("TranscriptionJob", {}))
+        if not output_uri or not output_uri.startswith("s3://"):
+            return
+        location = parse_s3_uri(output_uri)
+        self.s3_client.delete_object(Bucket=location.bucket, Key=location.key)
 
-        Cleanup is intentionally opt-in. `delete_input` removes the media object
-        referenced by the job handle; use it only when this library uploaded or
-        otherwise owns that object.
-        """
-        cleanup_policy = cleanup_policy or self.cleanup_policy
-        if cleanup_policy.delete_output:
-            self.s3_client.delete_object(Bucket=job.output_bucket, Key=job.output_key)
-        if cleanup_policy.delete_input:
-            media = job.media_location
-            self.s3_client.delete_object(Bucket=media.bucket, Key=media.key)
-        if cleanup_policy.delete_job:
-            self.transcribe_client.delete_transcription_job(TranscriptionJobName=job.name)
-
-    def process(
-        self,
-        media: str | PathLike[str],
-        *,
-        output_bucket: str,
-        input_bucket: str | None = None,
-        input_key: str | None = None,
-        input_prefix: str = "aws_transcribe/input",
-        output_key: str | None = None,
-        output_prefix: str = "aws_transcribe/output",
-        job_name: str | None = None,
-        job_name_prefix: str = "ampav-aws-transcribe",
-        transcription: TranscriptionSettings | None = None,
-        cleanup_policy: CleanupPolicy | None = None,
-    ) -> ToolOutput:
-        """Transcribe local or S3 media and return AMPAV output."""
-        cleanup_policy = cleanup_policy or self.cleanup_policy
-        media_uri = str(media)
-        media_was_uploaded = False
-
-        if not media_uri.startswith("s3://"):
-            audio_path = Path(media).expanduser().resolve()
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            job_name = job_name or build_job_name(str(audio_path), job_name_prefix, timestamp)
-            input_location = self.upload_media(
-                audio_path,
-                bucket=input_bucket or output_bucket,
-                key=input_key,
-                prefix=input_prefix,
-                job_name=job_name,
-                job_name_prefix=job_name_prefix,
-            )
-            media_uri = input_location.uri
-            media_was_uploaded = True
-
-        job = self.submit(
-            media_uri,
-            output_bucket=output_bucket,
-            output_key=output_key,
-            output_prefix=output_prefix,
-            job_name=job_name,
-            job_name_prefix=job_name_prefix,
-            transcription=transcription,
-        )
-        if media_was_uploaded:
-            job = job.model_copy(update={"media_was_uploaded": True})
-
-        started = time.monotonic()
-        status = self.get_status(job)
-        while not status.is_done:
-            logging.info("AWS Transcribe job %s status: %s", job.name, status.aws_status)
-            if self.timeout is not None and time.monotonic() - started > self.timeout:
-                self.cleanup(job, cleanup_policy)
-                raise AwsTranscribeError(job.name, "did not finish within timeout")
-            time.sleep(self.polling_interval)
-            status = self.get_status(job)
-
-        logging.info("AWS Transcribe job %s status: %s", job.name, status.aws_status)
-        if status.status != AsyncStatusCode.SUCCEEDED:
-            self.cleanup(job, cleanup_policy)
-            reason = status.failure_reason or "no failure reason returned"
-            raise AwsTranscribeError(job.name, f"failed: {reason}")
-
-        external_result = self.get_external_result(job)
-        if external_result is None:
-            self.cleanup(job, cleanup_policy)
-            raise AwsTranscribeError(job.name, "succeeded without an available transcript")
-
-        output = self.to_tool_output(job, external_result)
-        self.cleanup(job, cleanup_policy)
-        return output
+    def _delete_job_record(self, job_id: str) -> None:
+        try:
+            self.transcribe_client.delete_transcription_job(TranscriptionJobName=job_id)
+        except ClientError as exc:
+            if _is_not_found_error(exc):
+                return
+            raise
 
 
 def build_start_job_request(
     *,
     job_name: str,
-    media_uri: str,
-    output_bucket: str,
-    output_key: str,
-    transcription: TranscriptionSettings,
+    input_s3_uri: str,
+    output_location: S3Location | None,
+    transcription_settings: TranscriptionSettings,
 ) -> dict[str, Any]:
     """Build a boto3 `start_transcription_job` request body."""
     request: dict[str, Any] = {
         "TranscriptionJobName": job_name,
-        "Media": {"MediaFileUri": media_uri},
-        "MediaFormat": transcription.media_format or infer_media_format(media_uri),
-        "OutputBucketName": output_bucket,
-        "OutputKey": output_key,
+        "Media": {"MediaFileUri": input_s3_uri},
+        "MediaFormat": transcription_settings.media_format or infer_media_format(input_s3_uri),
     }
 
-    if transcription.identify_language:
-        request["IdentifyLanguage"] = True
-        if transcription.language_options:
-            request["LanguageOptions"] = transcription.language_options
-    else:
-        request["LanguageCode"] = transcription.language_code
+    if output_location is not None:
+        request["OutputBucketName"] = output_location.bucket
+        request["OutputKey"] = output_location.key
 
-    if transcription.show_speaker_labels:
+    if transcription_settings.identify_language:
+        request["IdentifyLanguage"] = True
+        if transcription_settings.language_options:
+            request["LanguageOptions"] = transcription_settings.language_options
+    else:
+        request["LanguageCode"] = transcription_settings.language_code
+
+    if transcription_settings.show_speaker_labels:
         request["Settings"] = {
             "ShowSpeakerLabels": True,
-            "MaxSpeakerLabels": transcription.max_speaker_labels,
+            "MaxSpeakerLabels": transcription_settings.max_speaker_labels,
         }
 
     return request
@@ -379,7 +337,7 @@ def safe_job_part(value: str) -> str:
 def infer_media_format(source: str | Path) -> str:
     media_format = Path(str(source)).suffix.lower().lstrip(".")
     if not media_format:
-        raise ValueError("media_format is required when the media URI or file has no extension")
+        raise ValueError("media_format is required when the media URI has no extension")
     return media_format
 
 
@@ -402,14 +360,15 @@ def timestamp_or_none(value: object) -> float | None:
     return value.timestamp() if isinstance(value, datetime) else None
 
 
-def tool_parameters(job: AwsTranscribeJob, job_data: dict[str, Any]) -> dict[str, Any]:
+def tool_parameters(job_data: dict[str, Any]) -> dict[str, Any]:
+    settings = job_data.get("Settings") or {}
     parameters = {
-        "content_source": job.media_uri,
-        "media_was_uploaded": job.media_was_uploaded,
-        "output_bucket": job.output_bucket,
-        "output_key": job.output_key,
+        "media_format": job_data.get("MediaFormat"),
         "language_code": job_data.get("LanguageCode"),
         "identified_language_score": job_data.get("IdentifiedLanguageScore"),
+        "identify_language": job_data.get("IdentifyLanguage"),
+        "show_speaker_labels": settings.get("ShowSpeakerLabels"),
+        "max_speaker_labels": settings.get("MaxSpeakerLabels"),
     }
     return {key: value for key, value in parameters.items() if value is not None}
 
@@ -418,82 +377,34 @@ def json_safe(data: Any) -> Any:
     return json.loads(json.dumps(data, default=str))
 
 
-def build_cli_parser() -> argparse.ArgumentParser:
-    """Build the AWS Transcribe CLI parser."""
-    parser = argparse.ArgumentParser(description="Transcribe media with AWS Transcribe and print AMPAV ToolOutput YAML.")
-    parser.add_argument("media", help="Local media path or s3://bucket/key media URI")
-    parser.add_argument("--output-bucket", required=True, help="S3 bucket where AWS writes the transcript JSON")
-    parser.add_argument("--output-key", help="S3 key where AWS writes the transcript JSON")
-    parser.add_argument("--output-prefix", default="aws_transcribe/output", help="S3 prefix for generated output keys")
-    parser.add_argument("--input-bucket", help="S3 bucket for uploading a local media file; defaults to output bucket")
-    parser.add_argument("--input-key", help="S3 key for uploading a local media file")
-    parser.add_argument("--input-prefix", default="aws_transcribe/input", help="S3 prefix for generated input keys")
-    parser.add_argument("--job-name", help="AWS Transcribe job name; generated when omitted")
-    parser.add_argument("--job-name-prefix", default="ampav-aws-transcribe", help="Prefix for generated job names")
-    parser.add_argument("--media-format", help="AWS media format; inferred from extension when omitted")
-    parser.add_argument("--language-code", default="en-US", help="AWS language code when language identification is off")
-    parser.add_argument("--identify-language", action="store_true", help="Enable AWS language identification")
-    parser.add_argument("--language-option", action="append", default=[], help="Allowed language when identifying language")
-    parser.add_argument("--no-speaker-labels", action="store_true", help="Disable AWS speaker diarization")
-    parser.add_argument("--max-speaker-labels", type=int, default=10, help="Maximum AWS speaker labels")
-    parser.add_argument("--profile", help="AWS profile name for boto3 session")
-    parser.add_argument("--region", help="AWS region for boto3 session")
-    parser.add_argument("--poll-interval", type=int, default=30, help="Seconds between job status checks")
-    parser.add_argument("--timeout", type=int, default=7200, help="Maximum seconds to wait for completion")
-    parser.add_argument("--delete-job", action="store_true", help="Delete AWS Transcribe job after fetching output")
-    parser.add_argument("--delete-input", action="store_true", help="Delete uploaded input S3 object after fetching output")
-    parser.add_argument("--delete-output", action="store_true", help="Delete output S3 object after fetching output")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    return parser
-
-
-def cli_aws_transcribe() -> None:
-    """Console entry point for `ampav_aws_transcribe`."""
-    args = build_cli_parser().parse_args()
-    logging.basicConfig(format=LOG_FORMAT, level=logging.DEBUG if args.debug else logging.INFO)
-
-    transcription = TranscriptionSettings(
-        media_format=args.media_format,
-        language_code=args.language_code,
-        identify_language=args.identify_language,
-        language_options=args.language_option,
-        show_speaker_labels=not args.no_speaker_labels,
-        max_speaker_labels=args.max_speaker_labels,
+def _status_from_job_data(job_data: dict[str, Any], *, details: bool = True) -> AsyncJobStatus:
+    aws_status = job_data["TranscriptionJobStatus"]
+    failure_reason = job_data.get("FailureReason")
+    status_data = {
+        "job_id": job_data["TranscriptionJobName"],
+        "status": map_aws_transcribe_status(aws_status),
+        "message": failure_reason,
+    }
+    if not details:
+        return AsyncJobStatus(**status_data)
+    return AwsJobStatus(
+        **status_data,
+        job_name=job_data["TranscriptionJobName"],
+        input_s3_uri=_media_file_uri(job_data),
+        output_s3_uri=_transcript_file_uri(job_data),
     )
-    cleanup_policy = CleanupPolicy(
-        delete_job=args.delete_job,
-        delete_input=args.delete_input,
-        delete_output=args.delete_output,
-    )
-    aws = AwsTranscribe(
-        region_name=args.region,
-        profile_name=args.profile,
-        polling_interval=args.poll_interval,
-        timeout=args.timeout,
-    )
-    try:
-        result = aws.process(
-            args.media,
-            output_bucket=args.output_bucket,
-            input_bucket=args.input_bucket,
-            input_key=args.input_key,
-            input_prefix=args.input_prefix,
-            output_key=args.output_key,
-            output_prefix=args.output_prefix,
-            job_name=args.job_name,
-            job_name_prefix=args.job_name_prefix,
-            transcription=transcription,
-            cleanup_policy=cleanup_policy,
-        )
-    except Exception as exc:
-        cli_errors = (ToolError, BotoCoreError, ClientError, OSError, ValueError)
-        if not isinstance(exc, cli_errors):
-            raise
-        logging.error("%s", exc)
-        raise SystemExit(1) from exc
-
-    print(result.model_dump_yaml(sort_keys=False))
 
 
-if __name__ == "__main__":
-    cli_aws_transcribe()
+def _media_file_uri(job_data: dict[str, Any]) -> str | None:
+    uri = job_data.get("Media", {}).get("MediaFileUri")
+    return uri if isinstance(uri, str) else None
+
+
+def _transcript_file_uri(job_data: dict[str, Any]) -> str | None:
+    uri = job_data.get("Transcript", {}).get("TranscriptFileUri")
+    return uri if isinstance(uri, str) else None
+
+
+def _is_not_found_error(exc: ClientError) -> bool:
+    code = exc.response.get("Error", {}).get("Code")
+    return code in {"BadRequestException", "NotFoundException", "ResourceNotFoundException"}
