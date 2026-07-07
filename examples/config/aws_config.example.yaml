@@ -30,5 +30,4 @@ comprehend:
   data_access_role_arn: YOUR_COMPREHEND_DATA_ACCESS_ROLE_ARN
   output_prefix: aws_comprehend/output
   language_code: en
-  input_format: ONE_DOC_PER_FILE
   job_name_suffix: AMP-Intro

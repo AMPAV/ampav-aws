@@ -5,10 +5,14 @@ import unittest
 from datetime import datetime, timezone
 
 from ampav.core.async_tool import AsyncStatusCode
+from ampav.core.schema import NamedEntities
 
 from ampav.aws.comprehend import AwsComprehend, parse_output_archive
 from ampav.aws.errors import AwsComprehendError
 from ampav.aws.job import AwsJobStatus
+
+
+SAMPLE_TEXT = "Maya Chen from Indiana University met Rafael Ortiz at Amazon in Seattle."
 
 
 class FakeBody:
@@ -78,6 +82,7 @@ class FakeComprehendClient:
 class FakeS3Client:
     def __init__(self) -> None:
         self.deleted: list[tuple[str, str]] = []
+        self.reads: list[tuple[str, str]] = []
         self.archive = build_archive(
             [
                 {
@@ -85,8 +90,8 @@ class FakeS3Client:
                     "Entities": [
                         {"BeginOffset": 0, "EndOffset": 10, "Score": 0.99, "Text": "Maya Chen", "Type": "PERSON"},
                         {
-                            "BeginOffset": 16,
-                            "EndOffset": 34,
+                            "BeginOffset": 15,
+                            "EndOffset": 33,
                             "Score": 0.98,
                             "Text": "Indiana University",
                             "Type": "ORGANIZATION",
@@ -97,7 +102,10 @@ class FakeS3Client:
         )
 
     def get_object(self, Bucket: str, Key: str) -> dict:
-        return {"Body": FakeBody(self.archive)}
+        self.reads.append((Bucket, Key))
+        if Key.endswith(".tar.gz"):
+            return {"Body": FakeBody(self.archive)}
+        return {"Body": FakeBody(SAMPLE_TEXT.encode("utf-8"))}
 
     def delete_object(self, Bucket: str, Key: str) -> None:
         self.deleted.append((Bucket, Key))
@@ -185,7 +193,7 @@ class AwsComprehendApiTest(unittest.TestCase):
         self.assertEqual(status.input_s3_uri, "s3://in/input.txt")
         self.assertEqual(status.output_s3_uri, "s3://out/output/job/output.tar.gz")
 
-    def test_get_result_reads_output_archive_into_tool_private(self) -> None:
+    def test_get_result_converts_output_archive_to_named_entities(self) -> None:
         comprehend = FakeComprehendClient()
         s3 = FakeS3Client()
         client = AwsComprehend(
@@ -204,10 +212,31 @@ class AwsComprehendApiTest(unittest.TestCase):
 
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(result.output, None)
+        self.assertIsInstance(result.output, NamedEntities)
+        assert isinstance(result.output, NamedEntities)
+        self.assertEqual(result.output.text, SAMPLE_TEXT)
+        self.assertEqual(result.output.languages, ["en"])
+        self.assertEqual(
+            [
+                (entity.text, entity.entity_type, entity.confidence, entity.begin_offset, entity.end_offset, entity.language)
+                for entity in result.output.spans
+            ],
+            [
+                ("Maya Chen", "PERSON", 0.99, 0, 10, "en"),
+                ("Indiana University", "ORGANIZATION", 0.98, 15, 33, "en"),
+            ],
+        )
         self.assertEqual(result.parameters["archive_members"], ["output"])
+        self.assertEqual(result.parameters["record_count"], 1)
         self.assertEqual(result.tool_private["raw_records"][0]["File"], "input.txt")
         self.assertEqual(result.tool_private["raw_records"][0]["Entities"][0]["Text"], "Maya Chen")
+        self.assertEqual(
+            s3.reads,
+            [
+                ("in", "input.txt"),
+                ("out", "output/job/output.tar.gz"),
+            ],
+        )
 
     def test_process_polls_until_completion_and_returns_tool_output(self) -> None:
         comprehend = FakeComprehendClient(statuses=["IN_PROGRESS", "COMPLETED"])
@@ -226,6 +255,9 @@ class AwsComprehendApiTest(unittest.TestCase):
             job_name_suffix="entities-test",
         )
 
+        self.assertIsInstance(result.output, NamedEntities)
+        assert isinstance(result.output, NamedEntities)
+        self.assertEqual(result.output.spans[1].text, "Indiana University")
         self.assertEqual(result.tool_private["raw_records"][0]["Entities"][1]["Text"], "Indiana University")
         self.assertGreaterEqual(len(comprehend.described), 3)
 
@@ -244,6 +276,33 @@ class AwsComprehendApiTest(unittest.TestCase):
         client, _, _ = self.make_client(statuses=["FAILED"])
 
         with self.assertRaises(AwsComprehendError):
+            client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
+
+    def test_process_raises_on_record_error(self) -> None:
+        client, _, s3 = self.make_client()
+        s3.archive = build_archive(
+            [
+                {
+                    "File": "input.txt",
+                    "ErrorCode": "DOCUMENT_SIZE_EXCEEDED",
+                    "ErrorMessage": "too large",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(AwsComprehendError, "DOCUMENT_SIZE_EXCEEDED"):
+            client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
+
+    def test_process_raises_on_multiple_records(self) -> None:
+        client, _, s3 = self.make_client()
+        s3.archive = build_archive(
+            [
+                {"File": "a.txt", "Entities": []},
+                {"File": "b.txt", "Entities": []},
+            ]
+        )
+
+        with self.assertRaisesRegex(AwsComprehendError, "expected one Comprehend output record"):
             client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
 
     def test_cleanup_deletes_requested_output_only(self) -> None:
