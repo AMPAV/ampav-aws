@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from ampav.core.async_tool import AsyncStatusCode
 from ampav.core.schema import NamedEntities
 
+from ampav.aws import __version__
 from ampav.aws.comprehend_named_entities import AwsComprehendNamedEntities, parse_output_archive
 from ampav.aws.errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
 from ampav.aws.job import AwsJobStatus
@@ -214,6 +215,7 @@ class AwsComprehendNamedEntitiesApiTest(unittest.TestCase):
         assert result is not None
         self.assertIsInstance(result.output, NamedEntities)
         assert isinstance(result.output, NamedEntities)
+        self.assertEqual(result.tool_version, __version__)
         self.assertEqual(result.output.text, SAMPLE_TEXT)
         self.assertEqual(result.output.languages, ["en"])
         self.assertEqual(
@@ -257,6 +259,7 @@ class AwsComprehendNamedEntitiesApiTest(unittest.TestCase):
 
         self.assertIsInstance(result.output, NamedEntities)
         assert isinstance(result.output, NamedEntities)
+        self.assertEqual(result.tool_version, __version__)
         self.assertEqual(result.output.spans[1].text, "Indiana University")
         self.assertEqual(result.tool_private["raw_records"][0]["Entities"][1]["Text"], "Indiana University")
         self.assertGreaterEqual(len(comprehend.described), 3)

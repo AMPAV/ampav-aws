@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import NamedEntities, NamedEntity, ToolOutput
 
+from ._version import __version__
 from .errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
 from .job import AwsJobStatus
 from .s3 import join_s3_key, parse_s3_uri
@@ -218,6 +219,7 @@ class AwsComprehendNamedEntities(AsyncTool):
 
         return ToolOutput(
             tool_name="aws_comprehend_named_entities",
+            tool_version=__version__,
             parameters={
                 "archive_members": result.archive_members,
                 "record_count": len(result.records),

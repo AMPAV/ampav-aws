@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import ToolOutput
 
+from ._version import __version__
 from .errors import AwsTranscribeError, AwsTranscriptSchemaError
 from .job import AwsJobStatus
 from .s3 import S3Location, parse_s3_uri
@@ -205,6 +206,7 @@ class AwsTranscribe(AsyncTool):
         transcript = aws_transcript_to_transcript(aws_model)
         return ToolOutput(
             tool_name="aws_transcribe",
+            tool_version=__version__,
             output=transcript,
         )
 
@@ -263,6 +265,7 @@ class AwsTranscribe(AsyncTool):
 
         return ToolOutput(
             tool_name="aws_transcribe",
+            tool_version=__version__,
             parameters=parameters,
             queue_time=timestamp_or_none(job_data.get("CreationTime")),
             start_time=timestamp_or_none(job_data.get("StartTime")) or timestamp_or_none(job_data.get("CreationTime")),
