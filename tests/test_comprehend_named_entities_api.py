@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from ampav.core.async_tool import AsyncStatusCode
 from ampav.core.schema import NamedEntities
 
-from ampav.aws.comprehend import AwsComprehend, parse_output_archive
-from ampav.aws.errors import AwsComprehendError
+from ampav.aws.comprehend_named_entities import AwsComprehendNamedEntities, parse_output_archive
+from ampav.aws.errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
 from ampav.aws.job import AwsJobStatus
 
 
@@ -35,7 +35,7 @@ class FakeComprehendClient:
         self.started: list[dict] = []
         self.described: list[str] = []
         self.stopped: list[str] = []
-        self.output_s3_uri = "s3://out/aws_comprehend/output/job/output.tar.gz"
+        self.output_s3_uri = "s3://out/aws_comprehend_named_entities/output/job/output.tar.gz"
 
     def start_entities_detection_job(self, **request: object) -> dict:
         self.started.append(request)
@@ -67,7 +67,7 @@ class FakeComprehendClient:
             "EntitiesDetectionJobPropertiesList": [
                 {
                     "JobId": "job-123",
-                    "JobName": "ampav-aws-comprehend-20260601-sample",
+                    "JobName": "ampav-aws-comprehend-named-entities-20260601-sample",
                     "JobStatus": "COMPLETED",
                     "OutputDataConfig": {"S3Uri": self.output_s3_uri},
                 }
@@ -111,18 +111,18 @@ class FakeS3Client:
         self.deleted.append((Bucket, Key))
 
 
-class AwsComprehendApiTest(unittest.TestCase):
+class AwsComprehendNamedEntitiesApiTest(unittest.TestCase):
     def make_client(
         self,
         statuses: list[str] | None = None,
-    ) -> tuple[AwsComprehend, FakeComprehendClient, FakeS3Client]:
+    ) -> tuple[AwsComprehendNamedEntities, FakeComprehendClient, FakeS3Client]:
         comprehend = FakeComprehendClient(statuses=statuses)
         s3 = FakeS3Client()
         return (
-            AwsComprehend(
+            AwsComprehendNamedEntities(
                 comprehend_client=comprehend,
                 s3_client=s3,
-                data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+                data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehendNamedEntities",
                 polling_interval=0.001,
             ),
             comprehend,
@@ -133,28 +133,28 @@ class AwsComprehendApiTest(unittest.TestCase):
         client, comprehend, _ = self.make_client()
 
         job_id = client.submit(
-            "s3://in/aws_comprehend/input/sample.txt",
-            output_s3_uri="s3://out/aws_comprehend/output",
+            "s3://in/aws_comprehend_named_entities/input/sample.txt",
+            output_s3_uri="s3://out/aws_comprehend_named_entities/output",
             job_name_suffix="entities-test",
         )
 
         self.assertEqual(job_id, "job-123")
         request = comprehend.started[0]
-        self.assertTrue(request["JobName"].startswith("ampav-aws-comprehend-"))
+        self.assertTrue(request["JobName"].startswith("ampav-aws-comprehend-named-entities-"))
         self.assertTrue(request["JobName"].endswith("-entities-test"))
-        self.assertEqual(request["InputDataConfig"]["S3Uri"], "s3://in/aws_comprehend/input/sample.txt")
+        self.assertEqual(request["InputDataConfig"]["S3Uri"], "s3://in/aws_comprehend_named_entities/input/sample.txt")
         self.assertEqual(request["InputDataConfig"]["InputFormat"], "ONE_DOC_PER_FILE")
-        self.assertEqual(request["OutputDataConfig"]["S3Uri"], "s3://out/aws_comprehend/output")
+        self.assertEqual(request["OutputDataConfig"]["S3Uri"], "s3://out/aws_comprehend_named_entities/output")
         self.assertEqual(request["LanguageCode"], "en")
         self.assertNotIn("ClientRequestToken", request)
 
     def test_submit_applies_tool_level_kms_defaults(self) -> None:
         comprehend = FakeComprehendClient()
         s3 = FakeS3Client()
-        client = AwsComprehend(
+        client = AwsComprehendNamedEntities(
             comprehend_client=comprehend,
             s3_client=s3,
-            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehendNamedEntities",
             output_kms_key_id="arn:aws:kms:us-east-2:123456789012:key/output",
             volume_kms_key_id="arn:aws:kms:us-east-2:123456789012:key/volume",
             entity_recognizer_arn="arn:aws:comprehend:us-east-2:123456789012:entity-recognizer/test",
@@ -173,7 +173,7 @@ class AwsComprehendApiTest(unittest.TestCase):
     def test_submit_requires_role_arn(self) -> None:
         comprehend = FakeComprehendClient()
         s3 = FakeS3Client()
-        client = AwsComprehend(comprehend_client=comprehend, s3_client=s3)
+        client = AwsComprehendNamedEntities(comprehend_client=comprehend, s3_client=s3)
 
         with self.assertRaises(ValueError):
             client.submit("s3://in/input.txt", output_s3_uri="s3://out/output")
@@ -196,10 +196,10 @@ class AwsComprehendApiTest(unittest.TestCase):
     def test_get_result_converts_output_archive_to_named_entities(self) -> None:
         comprehend = FakeComprehendClient()
         s3 = FakeS3Client()
-        client = AwsComprehend(
+        client = AwsComprehendNamedEntities(
             comprehend_client=comprehend,
             s3_client=s3,
-            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehendNamedEntities",
             include_tool_private=True,
         )
         job_id = client.submit(
@@ -241,10 +241,10 @@ class AwsComprehendApiTest(unittest.TestCase):
     def test_process_polls_until_completion_and_returns_tool_output(self) -> None:
         comprehend = FakeComprehendClient(statuses=["IN_PROGRESS", "COMPLETED"])
         s3 = FakeS3Client()
-        client = AwsComprehend(
+        client = AwsComprehendNamedEntities(
             comprehend_client=comprehend,
             s3_client=s3,
-            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehendNamedEntities",
             include_tool_private=True,
             polling_interval=0.001,
         )
@@ -275,7 +275,7 @@ class AwsComprehendApiTest(unittest.TestCase):
     def test_process_raises_on_failed_job(self) -> None:
         client, _, _ = self.make_client(statuses=["FAILED"])
 
-        with self.assertRaises(AwsComprehendError):
+        with self.assertRaises(AwsComprehendNamedEntitiesError):
             client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
 
     def test_process_raises_on_record_error(self) -> None:
@@ -290,7 +290,7 @@ class AwsComprehendApiTest(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(AwsComprehendError, "DOCUMENT_SIZE_EXCEEDED"):
+        with self.assertRaisesRegex(AwsComprehendNamedEntitiesError, "DOCUMENT_SIZE_EXCEEDED"):
             client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
 
     def test_process_raises_on_multiple_records(self) -> None:
@@ -302,16 +302,32 @@ class AwsComprehendApiTest(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(AwsComprehendError, "expected one Comprehend output record"):
+        with self.assertRaisesRegex(AwsComprehendNamedEntitiesError, "expected one Comprehend output record"):
+            client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
+
+    def test_process_raises_schema_error_on_malformed_entity(self) -> None:
+        client, _, s3 = self.make_client()
+        s3.archive = build_archive(
+            [
+                {
+                    "File": "input.txt",
+                    "Entities": [
+                        {"BeginOffset": 0, "EndOffset": 10, "Score": 0.99, "Type": "PERSON"},
+                    ],
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(AwsComprehendNamedEntitiesSchemaError, "missing required field 'Text'"):
             client.process("s3://in/input.txt", output_s3_uri="s3://out/output", job_name_suffix="entities-test")
 
     def test_cleanup_deletes_requested_output_only(self) -> None:
         comprehend = FakeComprehendClient()
         s3 = FakeS3Client()
-        client = AwsComprehend(
+        client = AwsComprehendNamedEntities(
             comprehend_client=comprehend,
             s3_client=s3,
-            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehend",
+            data_access_role_arn="arn:aws:iam::123456789012:role/AwsComprehendNamedEntities",
             delete_user_owned_outputs=True,
         )
         job_id = client.submit(
@@ -347,7 +363,11 @@ class AwsComprehendApiTest(unittest.TestCase):
         client.submit("s3://in/input.txt", job_name_suffix="entities-test")
 
         request = client.comprehend_client.started[0]
-        self.assertTrue(request["OutputDataConfig"]["S3Uri"].startswith("s3://in/aws_comprehend/_ampav_tmp/ampav-aws-comprehend-"))
+        self.assertTrue(
+            request["OutputDataConfig"]["S3Uri"].startswith(
+                "s3://in/aws_comprehend_named_entities/_ampav_tmp/ampav-aws-comprehend-named-entities-"
+            )
+        )
         self.assertTrue(request["OutputDataConfig"]["S3Uri"].endswith("-entities-test"))
 
     def test_tool_managed_output_is_deleted_by_default(self) -> None:
@@ -359,7 +379,7 @@ class AwsComprehendApiTest(unittest.TestCase):
         self.assertEqual(len(s3.deleted), 1)
         bucket, key = s3.deleted[0]
         self.assertEqual(bucket, "in")
-        self.assertTrue(key.startswith("aws_comprehend/_ampav_tmp/ampav-aws-comprehend-"))
+        self.assertTrue(key.startswith("aws_comprehend_named_entities/_ampav_tmp/ampav-aws-comprehend-named-entities-"))
         self.assertTrue(key.endswith("-entities-test/job/output.tar.gz"))
 
     def test_parse_output_archive_reads_json_lines(self) -> None:

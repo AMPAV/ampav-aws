@@ -1,11 +1,11 @@
 """AWS tooling for AMPAV."""
 
-from .comprehend import AwsComprehend
+from .comprehend_named_entities import AwsComprehendNamedEntities
 from .job import AwsJobStatus
 from .transcribe import AwsTranscribe, TranscriptionSettings
 
 __all__ = [
-    "AwsComprehend",
+    "AwsComprehendNamedEntities",
     "AwsJobStatus",
     "AwsTranscribe",
     "TranscriptionSettings",
