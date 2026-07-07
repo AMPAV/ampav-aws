@@ -6,6 +6,8 @@ from typing import Any
 
 import yaml
 
+from ampav.core.schema import NamedEntities
+
 from ampav.aws.comprehend import AwsComprehend
 from ampav.aws.s3 import S3Location, join_s3_key
 
@@ -61,16 +63,14 @@ class AwsComprehendLiveTest(unittest.TestCase):
                 input_location.uri,
                 output_s3_uri=output_s3_uri,
                 language_code=comprehend_config.get("language_code", "en"),
-                input_format=comprehend_config.get("input_format", "ONE_DOC_PER_FILE"),
                 job_name_suffix=job_name_suffix,
             )
         finally:
             client.s3_client.delete_object(Bucket=input_location.bucket, Key=input_location.key)
 
-        records = result.tool_private["raw_records"]
-        self.assertGreaterEqual(len(records), 1)
-        self.assertIn("Entities", records[0])
-        entity_text = " ".join(entity["Text"] for entity in records[0]["Entities"])
+        self.assertIsInstance(result.output, NamedEntities)
+        assert isinstance(result.output, NamedEntities)
+        entity_text = " ".join(entity.text for entity in result.output.spans)
         self.assertTrue(any(term in entity_text for term in {"Maya", "Indiana", "Amazon", "Seattle"}))
 
 

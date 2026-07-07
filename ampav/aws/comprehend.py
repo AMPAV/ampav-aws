@@ -8,23 +8,22 @@ from pathlib import Path
 import re
 import tarfile
 import time
-from typing import Any, Literal
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
-from ampav.core.schema import ToolOutput
+from ampav.core.schema import NamedEntities, NamedEntity, ToolOutput
 
 from .errors import AwsComprehendError
 from .job import AwsJobStatus
 from .s3 import join_s3_key, parse_s3_uri
 
-InputFormat = Literal["ONE_DOC_PER_FILE", "ONE_DOC_PER_LINE"]
-
 _JOB_NAME_PREFIX = "ampav-aws-comprehend"
 _TOOL_MANAGED_OUTPUT_PREFIX = "aws_comprehend/_ampav_tmp"
+_INPUT_FORMAT = "ONE_DOC_PER_FILE"
 
 
 class StrictModel(BaseModel):
@@ -34,9 +33,10 @@ class StrictModel(BaseModel):
 
 
 class AwsComprehendResult(StrictModel):
-    """Provider-native result data retrieved from a completed Comprehend job."""
+    """Raw Comprehend result data plus the source text used for extraction."""
 
     raw_job: dict[str, Any]
+    source_text: str
     output_s3_uri: str
     archive_members: list[str]
     records: list[dict[str, Any]]
@@ -92,11 +92,10 @@ class AwsComprehend(AsyncTool):
         *,
         output_s3_uri: str | None = None,
         language_code: str = "en",
-        input_format: InputFormat = "ONE_DOC_PER_FILE",
         job_name_suffix: str | None = None,
         tags: list[dict[str, str]] | None = None,
     ) -> str:
-        """Submit an AWS Comprehend entities job for text input in S3."""
+        """Submit a one-document AWS Comprehend entities job for a UTF-8 text object in S3."""
         input_location = parse_s3_uri(input_s3_uri)
         role_arn = self.data_access_role_arn
         if not role_arn:
@@ -113,7 +112,6 @@ class AwsComprehend(AsyncTool):
             output_s3_uri=output_s3_uri,
             data_access_role_arn=role_arn,
             language_code=language_code,
-            input_format=input_format,
             job_name=name,
             entity_recognizer_arn=self.entity_recognizer_arn,
             output_kms_key_id=self.output_kms_key_id,
@@ -147,7 +145,7 @@ class AwsComprehend(AsyncTool):
         return statuses
 
     def get_result(self, job_id: str) -> ToolOutput | None:
-        """Return a transitional AMPAV `ToolOutput` when the batch job is ready."""
+        """Return AMPAV named entities when the Comprehend batch job is ready."""
         raw_job = self._get_job(job_id)
         status = _status_from_job_data(raw_job["EntitiesDetectionJobProperties"], details=False)
         if not status.is_done:
@@ -207,7 +205,7 @@ class AwsComprehend(AsyncTool):
 
     @staticmethod
     def native_to_tool_output(native: Any) -> ToolOutput:
-        """Convert native Comprehend result data into transitional AMPAV output."""
+        """Convert native Comprehend result data into AMPAV named entities."""
         if isinstance(native, AwsComprehendResult):
             result = native
         elif isinstance(native, dict):
@@ -222,7 +220,7 @@ class AwsComprehend(AsyncTool):
                 "record_count": len(result.records),
                 "has_record_errors": result.has_record_errors,
             },
-            output=None,
+            output=aws_comprehend_result_to_named_entities(result),
         )
 
     def _to_tool_output(self, job_id: str, result: AwsComprehendResult) -> ToolOutput:
@@ -251,6 +249,9 @@ class AwsComprehend(AsyncTool):
 
     def _get_native_result(self, raw_job: dict[str, Any]) -> AwsComprehendResult:
         output_s3_uri = get_output_s3_uri(raw_job)
+        input_s3_uri = get_input_s3_uri(raw_job)
+        logging.info("Reading AWS Comprehend input text from %s", input_s3_uri)
+        source_text = self._read_text_object(input_s3_uri)
         logging.info("Reading AWS Comprehend output from %s", output_s3_uri)
         output_location = parse_s3_uri(output_s3_uri)
         response = self.s3_client.get_object(Bucket=output_location.bucket, Key=output_location.key)
@@ -260,10 +261,17 @@ class AwsComprehend(AsyncTool):
         archive_members, records = parse_output_archive(archive_bytes)
         return AwsComprehendResult(
             raw_job=json_safe(raw_job),
+            source_text=source_text,
             output_s3_uri=output_s3_uri,
             archive_members=archive_members,
             records=records,
         )
+
+    def _read_text_object(self, input_s3_uri: str) -> str:
+        input_location = parse_s3_uri(input_s3_uri)
+        response = self.s3_client.get_object(Bucket=input_location.bucket, Key=input_location.key)
+        with response["Body"] as body:
+            return body.read().decode("utf-8")
 
     def _delete_output_if_needed(self, raw_job: dict[str, Any]) -> None:
         output_s3_uri = get_output_s3_uri_or_none(raw_job)
@@ -282,7 +290,6 @@ def build_start_entities_request(
     output_s3_uri: str,
     data_access_role_arn: str,
     language_code: str,
-    input_format: InputFormat,
     job_name: str,
     entity_recognizer_arn: str | None = None,
     output_kms_key_id: str | None = None,
@@ -291,7 +298,7 @@ def build_start_entities_request(
 ) -> dict[str, Any]:
     """Build a boto3 `start_entities_detection_job` request body."""
     request: dict[str, Any] = {
-        "InputDataConfig": {"S3Uri": input_s3_uri, "InputFormat": input_format},
+        "InputDataConfig": {"S3Uri": input_s3_uri, "InputFormat": _INPUT_FORMAT},
         "OutputDataConfig": {"S3Uri": output_s3_uri},
         "DataAccessRoleArn": data_access_role_arn,
         "JobName": job_name,
@@ -334,6 +341,55 @@ def parse_output_archive(data: bytes) -> tuple[list[str], list[dict[str, Any]]]:
     return archive_members, records
 
 
+def aws_comprehend_result_to_named_entities(result: AwsComprehendResult) -> NamedEntities:
+    """Convert one-document Comprehend entity output to AMPAV named entities."""
+    record = single_success_record(result)
+    language = get_language_or_none(result.raw_job)
+    entities = [
+        aws_entity_to_named_entity(entity, language=language)
+        for entity in record.get("Entities", [])
+    ]
+    return NamedEntities(
+        text=result.source_text,
+        spans=entities,
+        languages=[language] if language else None,
+    )
+
+
+def single_success_record(result: AwsComprehendResult) -> dict[str, Any]:
+    """Return the only successful Comprehend output record."""
+    if len(result.records) != 1:
+        raise AwsComprehendError(None, f"expected one Comprehend output record, got {len(result.records)}")
+    record = result.records[0]
+    if "ErrorCode" in record or "ErrorMessage" in record:
+        code = record.get("ErrorCode", "UNKNOWN")
+        message = record.get("ErrorMessage", "no provider message")
+        raise AwsComprehendError(None, f"record failed with {code}: {message}")
+    entities = record.get("Entities")
+    if not isinstance(entities, list):
+        raise AwsComprehendError(None, "Comprehend output record did not include an Entities list")
+    return record
+
+
+def aws_entity_to_named_entity(entity: Any, *, language: str | None = None) -> NamedEntity:
+    """Map an AWS Comprehend entity object to the shared AMPAV span schema."""
+    if not isinstance(entity, dict):
+        raise AwsComprehendError(None, "Comprehend entity must be a JSON object")
+    try:
+        return NamedEntity(
+            text=str(entity["Text"]),
+            entity_type=str(entity["Type"]),
+            confidence=None if entity.get("Score") is None else float(entity["Score"]),
+            begin_offset=int(entity["BeginOffset"]),
+            end_offset=int(entity["EndOffset"]),
+            language=language,
+        )
+    except KeyError as exc:
+        raise AwsComprehendError(None, f"Comprehend entity missing required field {exc.args[0]!r}") from exc
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise AwsComprehendError(None, f"invalid Comprehend entity data: {exc}") from exc
+
+
 def get_output_s3_uri(raw_job: dict[str, Any]) -> str:
     output_s3_uri = get_output_s3_uri_or_none(raw_job)
     if not output_s3_uri:
@@ -356,6 +412,20 @@ def get_input_s3_uri_or_none(job_data: dict[str, Any]) -> str | None:
     input_config = job_data.get("InputDataConfig") or {}
     input_s3_uri = input_config.get("S3Uri")
     return input_s3_uri if isinstance(input_s3_uri, str) else None
+
+
+def get_input_s3_uri(raw_job: dict[str, Any]) -> str:
+    job_data = raw_job.get("EntitiesDetectionJobProperties") or {}
+    input_s3_uri = get_input_s3_uri_or_none(job_data)
+    if not input_s3_uri:
+        raise AwsComprehendError(None, "completed job did not include InputDataConfig.S3Uri")
+    return input_s3_uri
+
+
+def get_language_or_none(raw_job: dict[str, Any]) -> str | None:
+    job_data = raw_job.get("EntitiesDetectionJobProperties") or {}
+    language = job_data.get("LanguageCode")
+    return language if isinstance(language, str) else None
 
 
 def is_tool_managed_output_uri(output_s3_uri: str) -> bool:
