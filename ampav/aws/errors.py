@@ -20,11 +20,7 @@ class AwsTranscriptSchemaError(AwsTranscribeError):
         super().__init__(None, f"{path}: {message}")
 
 
-class AwsComprehendError(ToolError):
-    """Base class for AWS Comprehend workflow failures."""
-
-
-class AwsComprehendNamedEntitiesError(AwsComprehendError):
+class AwsComprehendNamedEntitiesError(ToolError):
     """Raised when the AWS Comprehend named-entities workflow fails."""
 
     def __init__(self, job_id: str | None, message: str):
