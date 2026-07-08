@@ -26,7 +26,7 @@ Issues = "https://github.com/AMPAV/ampav-aws/issues"
 ampav_aws_transcribe = "ampav_aws_cli.transcribe:main"
 
 [tool.setuptools.packages.find]
-include = ["ampav*", "ampav_aws_cli*", "ampav_aws_utils*"]
+include = ["ampav*", "ampav_aws_cli*", "ampav_aws_pipeline*", "ampav_aws_utils*"]
 
 [build-system]
 requires = ["setuptools"]
