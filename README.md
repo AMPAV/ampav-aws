@@ -99,7 +99,8 @@ config for your AWS account, then run the copied scripts.
 
 - `aws_transcribe_file_example.py`: upload `data/AMP-Intro.m4a`, transcribe it using copied config, and write a `ToolOutput` YAML file.
 - `aws_transcribe_s3_example.py`: transcribe an existing `s3://` media URI using standard boto3 profile/region settings and write a `ToolOutput` YAML file.
-- `aws_comprehend_named_entities_example.py`: read `data/AMP-Intro-Transcript.yaml`, extract named entities using copied config, and write a `ToolOutput` YAML file.
+- `aws_comprehend_named_entities_transcript_example.py`: read `data/AMP-Intro-Transcript.yaml`, extract named entities using copied config, and write a `ToolOutput` YAML file.
+- `aws_comprehend_named_entities_s3_example.py`: extract named entities from an existing `s3://` text object using standard boto3 profile/region settings and write a `ToolOutput` YAML file.
 - `config/aws_config.example.yaml`: sample shared AWS config for examples.
 - `data/`: small curated inputs and checked-in example outputs.
 
