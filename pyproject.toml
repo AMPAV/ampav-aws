@@ -24,6 +24,7 @@ Issues = "https://github.com/AMPAV/ampav-aws/issues"
 
 [project.scripts]
 ampav_aws_transcribe = "ampav_aws_cli.transcribe:main"
+ampav_aws_comprehend_named_entities = "ampav_aws_cli.comprehend_named_entities:main"
 
 [tool.setuptools.packages.find]
 include = ["ampav*", "ampav_aws_cli*", "ampav_aws_pipeline*"]
