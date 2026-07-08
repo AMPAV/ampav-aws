@@ -46,6 +46,7 @@ The CLI is a thin wrapper over the Python API:
 
 ```bash
 ampav_aws_transcribe -h
+ampav_aws_comprehend_named_entities -h
 ```
 
 ```bash
@@ -64,6 +65,16 @@ ampav_aws_transcribe examples/data/AMP-Intro.m4a \
   --region us-east-2
 ```
 
+For Comprehend named entities from a local text file:
+
+```bash
+ampav_aws_comprehend_named_entities input.txt \
+  --input-bucket my-bucket \
+  --output-s3-uri s3://my-bucket/aws_comprehend_named_entities/output \
+  --data-access-role-arn arn:aws:iam::123456789012:role/ComprehendDataAccess \
+  --region us-east-2
+```
+
 Do not put AWS secret keys on the command line. Use boto3-native auth:
 
 - AWS profile via `--profile`
@@ -72,7 +83,7 @@ Do not put AWS secret keys on the command line. Use boto3-native auth:
 - `~/.aws/config` and `~/.aws/credentials`
 - IAM role credentials where available
 
-If the CLI uploads a local input file, it deletes that uploaded input by
+If a CLI uploads a local input file or text object, it deletes that uploaded input by
 default. Pass `--keep-input` to keep it. Caller-supplied output is kept by
 default; pass `--delete-user-owned-outputs` to remove it after retrieval.
 
@@ -88,6 +99,7 @@ config for your AWS account, then run the copied scripts.
 
 - `aws_transcribe_file_example.py`: upload `data/AMP-Intro.m4a`, transcribe it using copied config, and write a `ToolOutput` YAML file.
 - `aws_transcribe_s3_example.py`: transcribe an existing `s3://` media URI using standard boto3 profile/region settings and write a `ToolOutput` YAML file.
+- `aws_comprehend_named_entities_example.py`: read `data/AMP-Intro-Transcript.yaml`, extract named entities using copied config, and write a `ToolOutput` YAML file.
 - `config/aws_config.example.yaml`: sample shared AWS config for examples.
 - `data/`: small curated inputs and checked-in example outputs.
 
