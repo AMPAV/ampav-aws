@@ -1,4 +1,4 @@
-"""AWS Comprehend async batch entity detection client for AMPAV."""
+"""AWS Comprehend named-entities async client for AMPAV."""
 
 from datetime import datetime, timezone
 import io
@@ -17,12 +17,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import NamedEntities, NamedEntity, ToolOutput
 
-from .errors import AwsComprehendError
+from ._version import __version__
+from .errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
 from .job import AwsJobStatus
 from .s3 import join_s3_key, parse_s3_uri
 
-_JOB_NAME_PREFIX = "ampav-aws-comprehend"
-_TOOL_MANAGED_OUTPUT_PREFIX = "aws_comprehend/_ampav_tmp"
+_JOB_NAME_PREFIX = "ampav-aws-comprehend-named-entities"
+_TOOL_MANAGED_OUTPUT_PREFIX = "aws_comprehend_named_entities/_ampav_tmp"
 _INPUT_FORMAT = "ONE_DOC_PER_FILE"
 
 
@@ -32,7 +33,7 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class AwsComprehendResult(StrictModel):
+class AwsComprehendNamedEntitiesResult(StrictModel):
     """Raw Comprehend result data plus the source text used for extraction."""
 
     raw_job: dict[str, Any]
@@ -47,8 +48,8 @@ class AwsComprehendResult(StrictModel):
         return any("ErrorCode" in record or "ErrorMessage" in record for record in self.records)
 
 
-class AwsComprehend(AsyncTool):
-    """Low-level AWS Comprehend client for async batch entity detection."""
+class AwsComprehendNamedEntities(AsyncTool):
+    """Low-level AWS Comprehend client for async named-entity detection."""
 
     def __init__(
         self,
@@ -67,7 +68,7 @@ class AwsComprehend(AsyncTool):
         polling_interval: float = 30,
         timeout: float | None = 7200,
     ):
-        """Create an AWS Comprehend client from boto3 settings or injected clients."""
+        """Create an AWS Comprehend named-entities client from boto3 settings or injected clients."""
         if polling_interval <= 0:
             raise ValueError("polling_interval must be greater than 0")
         if timeout is not None and timeout <= 0:
@@ -95,7 +96,7 @@ class AwsComprehend(AsyncTool):
         job_name_suffix: str | None = None,
         tags: list[dict[str, str]] | None = None,
     ) -> str:
-        """Submit a one-document AWS Comprehend entities job for a UTF-8 text object in S3."""
+        """Submit a one-document AWS Comprehend named-entities job for a UTF-8 text object in S3."""
         input_location = parse_s3_uri(input_s3_uri)
         role_arn = self.data_access_role_arn
         if not role_arn:
@@ -119,18 +120,18 @@ class AwsComprehend(AsyncTool):
             tags=tags,
         )
 
-        logging.info("Starting AWS Comprehend entities job %s", name)
+        logging.info("Starting AWS Comprehend named-entities job %s", name)
         logging.debug("AWS Comprehend request: %s", json.dumps(request, default=str, sort_keys=True))
         response = self.comprehend_client.start_entities_detection_job(**request)
         return response["JobId"]
 
     def get_status(self, job_id: str, details: bool = True) -> AsyncJobStatus:
-        """Return normalized status information for an AWS Comprehend job."""
+        """Return normalized status information for an AWS Comprehend named-entities job."""
         raw_job = self._get_job(job_id)
         return _status_from_job_data(raw_job["EntitiesDetectionJobProperties"], details=details)
 
     def list_jobs(self) -> list[AsyncJobStatus]:
-        """Return AWS Comprehend entity jobs matching this instance's job-name prefix."""
+        """Return AWS Comprehend named-entities jobs matching this instance's job-name prefix."""
         response = self.comprehend_client.list_entities_detection_jobs()
         jobs = response.get("EntitiesDetectionJobPropertiesList", [])
         statuses: list[AsyncJobStatus] = []
@@ -154,7 +155,7 @@ class AwsComprehend(AsyncTool):
         if status.status != AsyncStatusCode.SUCCEEDED:
             self.cleanup(job_id)
             message = status.message or "no provider message"
-            raise AwsComprehendError(job_id, f"ended with status {status.status}: {message}")
+            raise AwsComprehendNamedEntitiesError(job_id, f"ended with status {status.status}: {message}")
 
         native = self._get_native_result(raw_job)
         output = self._to_tool_output(job_id, native)
@@ -174,7 +175,7 @@ class AwsComprehend(AsyncTool):
         started = time.monotonic()
         while not status.is_done:
             if self.timeout is not None and time.monotonic() - started > self.timeout:
-                raise AwsComprehendError(job_id, f"cleanup did not finish within {self.timeout} seconds")
+                raise AwsComprehendNamedEntitiesError(job_id, f"cleanup did not finish within {self.timeout} seconds")
             time.sleep(self.polling_interval)
             raw_job = self._get_job_or_none(job_id)
             if raw_job is None:
@@ -188,46 +189,50 @@ class AwsComprehend(AsyncTool):
         input_s3_uri: str,
         **kwargs: Any,
     ) -> ToolOutput:
-        """Submit a Comprehend job, wait for completion, clean up, and return output."""
+        """Submit a Comprehend named-entities job, wait for completion, clean up, and return output."""
         job_id = self.submit(input_s3_uri, **kwargs)
         started = time.monotonic()
         while not self.is_done(job_id):
-            logging.info("AWS Comprehend job %s is still running", job_id)
+            logging.info("AWS Comprehend named-entities job %s is still running", job_id)
             if self.timeout is not None and time.monotonic() - started > self.timeout:
                 self.cleanup(job_id)
-                raise AwsComprehendError(job_id, f"did not finish within {self.timeout} seconds")
+                raise AwsComprehendNamedEntitiesError(job_id, f"did not finish within {self.timeout} seconds")
             time.sleep(self.polling_interval)
 
         result = self.get_result(job_id)
         if result is None:
-            raise AwsComprehendError(job_id, "finished without available output")
+            raise AwsComprehendNamedEntitiesError(job_id, "finished without available output")
         return result
 
     @staticmethod
     def native_to_tool_output(native: Any) -> ToolOutput:
         """Convert native Comprehend result data into AMPAV named entities."""
-        if isinstance(native, AwsComprehendResult):
+        if isinstance(native, AwsComprehendNamedEntitiesResult):
             result = native
         elif isinstance(native, dict):
-            result = AwsComprehendResult.model_validate(native)
+            result = validate_aws_comprehend_named_entities_result(native)
         else:
-            raise AwsComprehendError(None, "native Comprehend result must be AwsComprehendResult or dict")
+            raise AwsComprehendNamedEntitiesSchemaError(
+                "$",
+                "native Comprehend result must be AwsComprehendNamedEntitiesResult or dict",
+            )
 
         return ToolOutput(
-            tool_name="aws_comprehend",
+            tool_name="aws_comprehend_named_entities",
+            tool_version=__version__,
             parameters={
                 "archive_members": result.archive_members,
                 "record_count": len(result.records),
                 "has_record_errors": result.has_record_errors,
             },
-            output=aws_comprehend_result_to_named_entities(result),
+            output=aws_comprehend_named_entities_result_to_named_entities(result),
         )
 
-    def _to_tool_output(self, job_id: str, result: AwsComprehendResult) -> ToolOutput:
+    def _to_tool_output(self, job_id: str, result: AwsComprehendNamedEntitiesResult) -> ToolOutput:
         output = self.native_to_tool_output(result)
         if self.include_tool_private:
             output.tool_private = {
-                "aws_comprehend_result": result.model_dump(mode="json"),
+                "aws_comprehend_named_entities_result": result.model_dump(mode="json"),
                 "raw_comprehend_job": result.raw_job,
                 "raw_records": result.records,
             }
@@ -247,7 +252,7 @@ class AwsComprehend(AsyncTool):
         except KeyError:
             return None
 
-    def _get_native_result(self, raw_job: dict[str, Any]) -> AwsComprehendResult:
+    def _get_native_result(self, raw_job: dict[str, Any]) -> AwsComprehendNamedEntitiesResult:
         output_s3_uri = get_output_s3_uri(raw_job)
         input_s3_uri = get_input_s3_uri(raw_job)
         logging.info("Reading AWS Comprehend input text from %s", input_s3_uri)
@@ -259,7 +264,7 @@ class AwsComprehend(AsyncTool):
             archive_bytes = body.read()
 
         archive_members, records = parse_output_archive(archive_bytes)
-        return AwsComprehendResult(
+        return AwsComprehendNamedEntitiesResult(
             raw_job=json_safe(raw_job),
             source_text=source_text,
             output_s3_uri=output_s3_uri,
@@ -334,14 +339,31 @@ def parse_output_archive(data: bytes) -> tuple[list[str], list[dict[str, Any]]]:
                         continue
                     record = json.loads(line)
                     if not isinstance(record, dict):
-                        raise AwsComprehendError(None, f"{member.name}:{line_number}: expected JSON object")
+                        raise AwsComprehendNamedEntitiesSchemaError(
+                            f"$.archive.{member.name}[{line_number}]",
+                            "expected JSON object",
+                        )
                     records.append(record)
     except (tarfile.TarError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AwsComprehendError(None, f"could not parse Comprehend output archive: {exc}") from exc
+        raise AwsComprehendNamedEntitiesSchemaError(
+            "$.archive",
+            f"could not parse Comprehend output archive: {exc}",
+        ) from exc
     return archive_members, records
 
 
-def aws_comprehend_result_to_named_entities(result: AwsComprehendResult) -> NamedEntities:
+def validate_aws_comprehend_named_entities_result(native: object) -> AwsComprehendNamedEntitiesResult:
+    """Validate the internal native result bundle consumed by AMPAV conversion."""
+    if not isinstance(native, dict):
+        raise AwsComprehendNamedEntitiesSchemaError("$", "expected object")
+    try:
+        return AwsComprehendNamedEntitiesResult.model_validate(native)
+    except ValidationError as exc:
+        error = exc.errors()[0]
+        raise AwsComprehendNamedEntitiesSchemaError(pydantic_loc_to_path(error["loc"]), str(error["msg"])) from exc
+
+
+def aws_comprehend_named_entities_result_to_named_entities(result: AwsComprehendNamedEntitiesResult) -> NamedEntities:
     """Convert one-document Comprehend entity output to AMPAV named entities."""
     record = single_success_record(result)
     language = get_language_or_none(result.raw_job)
@@ -356,25 +378,25 @@ def aws_comprehend_result_to_named_entities(result: AwsComprehendResult) -> Name
     )
 
 
-def single_success_record(result: AwsComprehendResult) -> dict[str, Any]:
+def single_success_record(result: AwsComprehendNamedEntitiesResult) -> dict[str, Any]:
     """Return the only successful Comprehend output record."""
     if len(result.records) != 1:
-        raise AwsComprehendError(None, f"expected one Comprehend output record, got {len(result.records)}")
+        raise AwsComprehendNamedEntitiesError(None, f"expected one Comprehend output record, got {len(result.records)}")
     record = result.records[0]
     if "ErrorCode" in record or "ErrorMessage" in record:
         code = record.get("ErrorCode", "UNKNOWN")
         message = record.get("ErrorMessage", "no provider message")
-        raise AwsComprehendError(None, f"record failed with {code}: {message}")
+        raise AwsComprehendNamedEntitiesError(None, f"record failed with {code}: {message}")
     entities = record.get("Entities")
     if not isinstance(entities, list):
-        raise AwsComprehendError(None, "Comprehend output record did not include an Entities list")
+        raise AwsComprehendNamedEntitiesSchemaError("$.records[0].Entities", "expected list")
     return record
 
 
 def aws_entity_to_named_entity(entity: Any, *, language: str | None = None) -> NamedEntity:
     """Map an AWS Comprehend entity object to the shared AMPAV span schema."""
     if not isinstance(entity, dict):
-        raise AwsComprehendError(None, "Comprehend entity must be a JSON object")
+        raise AwsComprehendNamedEntitiesSchemaError("$.records[0].Entities[]", "expected JSON object")
     try:
         return NamedEntity(
             text=str(entity["Text"]),
@@ -385,15 +407,21 @@ def aws_entity_to_named_entity(entity: Any, *, language: str | None = None) -> N
             language=language,
         )
     except KeyError as exc:
-        raise AwsComprehendError(None, f"Comprehend entity missing required field {exc.args[0]!r}") from exc
+        raise AwsComprehendNamedEntitiesSchemaError(
+            "$.records[0].Entities[]",
+            f"missing required field {exc.args[0]!r}",
+        ) from exc
     except (TypeError, ValueError, ValidationError) as exc:
-        raise AwsComprehendError(None, f"invalid Comprehend entity data: {exc}") from exc
+        raise AwsComprehendNamedEntitiesSchemaError("$.records[0].Entities[]", f"invalid entity data: {exc}") from exc
 
 
 def get_output_s3_uri(raw_job: dict[str, Any]) -> str:
     output_s3_uri = get_output_s3_uri_or_none(raw_job)
     if not output_s3_uri:
-        raise AwsComprehendError(None, "completed job did not include OutputDataConfig.S3Uri")
+        raise AwsComprehendNamedEntitiesSchemaError(
+            "$.EntitiesDetectionJobProperties.OutputDataConfig.S3Uri",
+            "field required",
+        )
     return output_s3_uri
 
 
@@ -418,7 +446,10 @@ def get_input_s3_uri(raw_job: dict[str, Any]) -> str:
     job_data = raw_job.get("EntitiesDetectionJobProperties") or {}
     input_s3_uri = get_input_s3_uri_or_none(job_data)
     if not input_s3_uri:
-        raise AwsComprehendError(None, "completed job did not include InputDataConfig.S3Uri")
+        raise AwsComprehendNamedEntitiesSchemaError(
+            "$.EntitiesDetectionJobProperties.InputDataConfig.S3Uri",
+            "field required",
+        )
     return input_s3_uri
 
 
@@ -434,7 +465,7 @@ def is_tool_managed_output_uri(output_s3_uri: str) -> bool:
 
 
 def build_job_name(source: str | Path, prefix: str, timestamp: str) -> str:
-    safe_prefix = safe_job_part(prefix) or "ampav-aws-comprehend"
+    safe_prefix = safe_job_part(prefix) or "ampav-aws-comprehend-named-entities"
     safe_stem = safe_job_part(Path(str(source).rstrip("/")).stem) or "entities"
     max_stem_length = max(1, 200 - len(safe_prefix) - len(timestamp) - 2)
     return f"{safe_prefix}-{timestamp}-{safe_stem[:max_stem_length]}".strip("-")
@@ -456,11 +487,24 @@ def map_aws_comprehend_status(status: str) -> AsyncStatusCode:
         case "FAILED" | "STOPPED":
             return AsyncStatusCode.FAILED
         case _:
-            raise AwsComprehendError(None, f"unknown AWS Comprehend status {status!r}")
+            raise AwsComprehendNamedEntitiesSchemaError(
+                "$.EntitiesDetectionJobProperties.JobStatus",
+                f"unknown AWS Comprehend status {status!r}",
+            )
 
 
 def json_safe(data: Any) -> Any:
     return json.loads(json.dumps(data, default=str))
+
+
+def pydantic_loc_to_path(loc: tuple[Any, ...]) -> str:
+    parts: list[str] = ["$"]
+    for item in loc:
+        if isinstance(item, int):
+            parts[-1] += f"[{item}]"
+        else:
+            parts.append(str(item))
+    return ".".join(parts)
 
 
 def _status_from_job_data(job_data: dict[str, Any], *, details: bool = True) -> AsyncJobStatus:

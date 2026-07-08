@@ -26,8 +26,8 @@ transcription:
   max_speaker_labels: 10
   job_name_suffix: AMP-Intro
 
-comprehend:
+comprehend_named_entities:
   data_access_role_arn: YOUR_COMPREHEND_DATA_ACCESS_ROLE_ARN
-  output_prefix: aws_comprehend/output
+  output_prefix: aws_comprehend_named_entities/output
   language_code: en
   job_name_suffix: AMP-Intro

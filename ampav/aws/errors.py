@@ -20,10 +20,18 @@ class AwsTranscriptSchemaError(AwsTranscribeError):
         super().__init__(None, f"{path}: {message}")
 
 
-class AwsComprehendError(ToolError):
-    """Raised when the AWS Comprehend workflow fails."""
+class AwsComprehendNamedEntitiesError(ToolError):
+    """Raised when the AWS Comprehend named-entities workflow fails."""
 
     def __init__(self, job_id: str | None, message: str):
         self.job_id = job_id
-        prefix = f"AWS Comprehend job {job_id}: " if job_id else "AWS Comprehend: "
+        prefix = f"AWS Comprehend named entities job {job_id}: " if job_id else "AWS Comprehend named entities: "
         super().__init__(prefix + message)
+
+
+class AwsComprehendNamedEntitiesSchemaError(AwsComprehendNamedEntitiesError):
+    """Raised when AWS Comprehend entity output does not match the consumed shape."""
+
+    def __init__(self, path: str, message: str):
+        self.path = path
+        super().__init__(None, f"{path}: {message}")

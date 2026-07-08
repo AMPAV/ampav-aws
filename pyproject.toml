@@ -1,6 +1,6 @@
 [project]
 name = "ampav-aws"
-version = "0.0.6"
+version = "0.0.7"
 description = "AWS tooling for the AMPAV environment"
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,7 +26,7 @@ Issues = "https://github.com/AMPAV/ampav-aws/issues"
 ampav_aws_transcribe = "ampav_aws_cli.transcribe:main"
 
 [tool.setuptools.packages.find]
-include = ["ampav*", "ampav_aws_cli*", "ampav_aws_utils*"]
+include = ["ampav*", "ampav_aws_cli*", "ampav_aws_pipeline*"]
 
 [build-system]
 requires = ["setuptools"]

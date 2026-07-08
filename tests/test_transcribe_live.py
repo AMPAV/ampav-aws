@@ -7,7 +7,7 @@ import yaml
 
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 from ampav.aws.transcribe_contract import validate_aws_transcript_contract
-from ampav_aws_utils.s3_files import upload_file
+from ampav_aws_pipeline.s3_files import upload_file
 
 
 ROOT = Path(__file__).resolve().parents[1]

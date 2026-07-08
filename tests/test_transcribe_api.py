@@ -5,10 +5,11 @@ from pathlib import Path
 
 from ampav.core.async_tool import AsyncStatusCode
 
+from ampav.aws import __version__
 from ampav.aws.job import AwsJobStatus
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
 from ampav_aws_cli.transcribe import build_cli_parser
-from ampav_aws_utils.s3_files import upload_file
+from ampav_aws_pipeline.s3_files import upload_file
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "aws_transcript_opendoor.json"
@@ -158,6 +159,7 @@ class AwsTranscribeApiTest(unittest.TestCase):
         )
 
         self.assertEqual(output.output.text, "Please open the door.")
+        self.assertEqual(output.tool_version, __version__)
         self.assertEqual(output.parameters["media_format"], "wav")
         self.assertEqual(output.parameters["language_code"], "en-US")
         self.assertNotIn("content_source", output.parameters)
@@ -178,6 +180,7 @@ class AwsTranscribeApiTest(unittest.TestCase):
         )
 
         self.assertIsNone(output.tool_private)
+        self.assertEqual(output.tool_version, __version__)
 
     def test_cleanup_deletes_requested_output_and_job(self) -> None:
         transcribe = FakeTranscribeClient()

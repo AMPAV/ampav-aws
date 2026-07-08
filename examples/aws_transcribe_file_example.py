@@ -5,8 +5,8 @@ config/aws_config.example.yaml to config/aws_config.yaml, update the copied
 config for your AWS account, then run this script from the copied directory.
 """
 
-from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
-from ampav_aws_utils.s3_files import upload_file
+from ampav.aws.transcribe import TranscriptionSettings
+from ampav_aws_pipeline.transcribe import transcribe_file
 
 from example_support import DATA_DIR, load_config, write_tool_output
 
@@ -28,32 +28,21 @@ def main() -> None:
     if not bucket:
         raise ValueError("s3.bucket is required")
 
-    client = AwsTranscribe(
+    result = transcribe_file(
+        INPUT_FILE,
+        input_bucket=bucket,
+        input_prefix=INPUT_PREFIX,
+        output_s3_uri=s3_config.get("output_s3_uri"),
+        job_name_suffix=transcription_config.pop("job_name_suffix", INPUT_FILE.stem),
+        transcription_settings=TranscriptionSettings(**transcription_config),
         region_name=aws_config.get("region"),
         profile_name=aws_config.get("profile_name"),
         delete_user_owned_outputs=bool(s3_config.get("delete_user_owned_outputs", False)),
         include_tool_private=bool(s3_config.get("include_tool_private", False)),
         polling_interval=polling_config.get("polling_interval", polling_config.get("interval_seconds", 30)),
         timeout=polling_config.get("timeout", polling_config.get("timeout_seconds", 7200)),
+        keep_uploaded_input=bool(s3_config.get("keep_uploaded_input", False)),
     )
-
-    input_location = upload_file(
-        client.s3_client,
-        INPUT_FILE,
-        bucket=bucket,
-        prefix=INPUT_PREFIX,
-        name_prefix="ampav-aws-transcribe",
-    )
-    try:
-        result = client.process(
-            input_location.uri,
-            output_s3_uri=s3_config.get("output_s3_uri"),
-            job_name_suffix=transcription_config.pop("job_name_suffix", INPUT_FILE.stem),
-            transcription_settings=TranscriptionSettings(**transcription_config),
-        )
-    finally:
-        if not s3_config.get("keep_uploaded_input", False):
-            client.s3_client.delete_object(Bucket=input_location.bucket, Key=input_location.key)
 
     output_path = write_tool_output(OUTPUT_FILE, result)
     print(f"Wrote {output_path}")
