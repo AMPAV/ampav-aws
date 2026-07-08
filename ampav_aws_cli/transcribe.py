@@ -12,7 +12,7 @@ from ampav.core.async_tool import ToolError
 from ampav.core.logging import LOG_FORMAT
 from ampav.aws.s3 import S3Location
 from ampav.aws.transcribe import AwsTranscribe, TranscriptionSettings
-from ampav_aws_utils.s3_files import upload_file
+from ampav_aws_pipeline.s3_files import upload_file
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
