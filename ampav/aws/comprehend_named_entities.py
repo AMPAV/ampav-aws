@@ -393,10 +393,21 @@ def single_success_record(result: AwsComprehendNamedEntitiesResult) -> dict[str,
     return record
 
 
-def aws_entity_to_named_entity(entity: Any, *, language: str | None = None) -> NamedEntity:
-    """Map an AWS Comprehend entity object to the shared AMPAV span schema."""
+def aws_entity_to_named_entity(
+    entity: Any,
+    *,
+    language: str | None = None,
+    path: str = "$.records[0].Entities[]",
+) -> NamedEntity:
+    """Map an AWS Comprehend entity object to the shared AMPAV span schema.
+
+    Args:
+        entity: Native entity mapping returned by AWS Comprehend.
+        language: Optional source language assigned to the normalized entity.
+        path: Validation path identifying the entity in its native response.
+    """
     if not isinstance(entity, dict):
-        raise AwsComprehendNamedEntitiesSchemaError("$.records[0].Entities[]", "expected JSON object")
+        raise AwsComprehendNamedEntitiesSchemaError(path, "expected JSON object")
     try:
         return NamedEntity(
             text=str(entity["Text"]),
@@ -408,11 +419,11 @@ def aws_entity_to_named_entity(entity: Any, *, language: str | None = None) -> N
         )
     except KeyError as exc:
         raise AwsComprehendNamedEntitiesSchemaError(
-            "$.records[0].Entities[]",
+            path,
             f"missing required field {exc.args[0]!r}",
         ) from exc
     except (TypeError, ValueError, ValidationError) as exc:
-        raise AwsComprehendNamedEntitiesSchemaError("$.records[0].Entities[]", f"invalid entity data: {exc}") from exc
+        raise AwsComprehendNamedEntitiesSchemaError(path, f"invalid entity data: {exc}") from exc
 
 
 def get_output_s3_uri(raw_job: dict[str, Any]) -> str:
