@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError
 from ampav.core.schema import NamedEntities, NamedEntity, ToolOutput
 from ampav.core.text_chunking import (
     TextChunk,
+    TextUnit,
     chunk_text,
     dechunk_text_spans,
     text_to_units,
@@ -93,23 +94,49 @@ class AwsComprehendNamedEntitiesRealtime:
         _validate_text(text)
         _validate_language_code(language_code)
         units = text_to_units(text, weight_fn=_utf8_size)
+        return self._process_with_units(
+            text,
+            units,
+            language_code=language_code,
+        )
+
+    def _process_with_units(
+        self,
+        text: str,
+        units: Sequence[TextUnit],
+        *,
+        language_code: str = "en",
+        media_duration: float | None = None,
+        extra_parameters: dict[str, Any] | None = None,
+    ) -> ToolOutput:
+        """Process text using canonical units supplied by an in-package adapter.
+
+        Public direct callers should use :meth:`process`. This internal hook
+        lets transcript adapters build text and units together from timestamped
+        words so extraction and timestamp alignment use one coordinate system.
+        """
+        _validate_text(text)
+        _validate_language_code(language_code)
         chunks = chunk_text(
             text,
             units,
             max_weight=self.max_chunk_bytes,
             overlap_weight=self.chunk_overlap_bytes,
         )
+        parameters: dict[str, Any] = {
+            "language_code": language_code,
+            "recognition_model": "built_in",
+            "provider_max_chunk_bytes": AWS_COMPREHEND_BUILT_IN_MAX_TEXT_BYTES,
+            "max_chunk_bytes": self.max_chunk_bytes,
+            "chunk_overlap_bytes": self.chunk_overlap_bytes,
+            "chunk_count": len(chunks),
+        }
+        if extra_parameters is not None:
+            parameters.update(extra_parameters)
         output = ToolOutput(
             tool_name=self.tool_name,
             tool_version=self.tool_version,
-            parameters={
-                "language_code": language_code,
-                "recognition_model": "built_in",
-                "provider_max_chunk_bytes": AWS_COMPREHEND_BUILT_IN_MAX_TEXT_BYTES,
-                "max_chunk_bytes": self.max_chunk_bytes,
-                "chunk_overlap_bytes": self.chunk_overlap_bytes,
-                "chunk_count": len(chunks),
-            },
+            parameters=parameters,
         )
 
         logger.debug(
@@ -151,6 +178,7 @@ class AwsComprehendNamedEntitiesRealtime:
             ) from exc
 
         output.output = NamedEntities(
+            media_duration=media_duration,
             text=text,
             spans=spans,
             languages=[language_code],

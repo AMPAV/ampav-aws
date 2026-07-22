@@ -8,7 +8,10 @@ from pathlib import Path
 
 from ampav.core.schema import Transcript, WordSegment
 
-from ampav_aws_pipeline.comprehend import extract_named_entities
+from ampav_aws_pipeline.comprehend import (
+    extract_named_entities,
+    extract_named_entities_realtime_from_transcript,
+)
 from ampav_aws_pipeline.transcribe import transcribe_file
 
 
@@ -91,6 +94,16 @@ class FakeComprehendClient:
         }
 
 
+class FakeComprehendRealtimeClient:
+    def __init__(self, responses: list[dict]) -> None:
+        self.responses = responses
+        self.requests: list[dict] = []
+
+    def detect_entities(self, **request: object) -> dict:
+        self.requests.append(request)
+        return self.responses[len(self.requests) - 1]
+
+
 class FakeTranscribeClient:
     def __init__(self) -> None:
         self.started: list[dict] = []
@@ -121,6 +134,85 @@ class FakeTranscribeClient:
 
 
 class PipelineAdaptersTest(unittest.TestCase):
+    def test_realtime_entities_uses_canonical_transcript_units_and_aligns_timestamps(self) -> None:
+        transcript = Transcript(
+            media_duration=12.3,
+            text="This raw transcript text is not used.",
+            languages=["en"],
+            words=[
+                WordSegment(word="IU", suffix="'s", start_time=0.0, end_time=0.2),
+                WordSegment(word="Media", start_time=0.3, end_time=0.5),
+                WordSegment(word="School", suffix=".", start_time=0.6, end_time=0.8),
+            ],
+        )
+        comprehend = FakeComprehendRealtimeClient(
+            [
+                {
+                    "Entities": [
+                        {
+                            "Text": "IU's Media",
+                            "Type": "ORGANIZATION",
+                            "Score": 0.98,
+                            "BeginOffset": 0,
+                            "EndOffset": 10,
+                        }
+                    ]
+                },
+                {
+                    "Entities": [
+                        {
+                            "Text": "School",
+                            "Type": "ORGANIZATION",
+                            "Score": 0.97,
+                            "BeginOffset": 0,
+                            "EndOffset": 6,
+                        }
+                    ]
+                },
+            ]
+        )
+
+        result = extract_named_entities_realtime_from_transcript(
+            transcript,
+            comprehend_client=comprehend,
+            max_chunk_bytes=12,
+            chunk_overlap_bytes=0,
+        )
+
+        self.assertEqual(
+            comprehend.requests,
+            [
+                {"Text": "IU's Media ", "LanguageCode": "en"},
+                {"Text": "School.", "LanguageCode": "en"},
+            ],
+        )
+        self.assertEqual(result.parameters["transcript_text_source"], "transcript.words")
+        self.assertEqual(result.parameters["transcript_text_separator"], " ")
+        self.assertEqual(result.messages, [])
+        self.assertEqual(result.output.text, "IU's Media School.")
+        self.assertEqual(result.output.media_duration, 12.3)
+        self.assertEqual(
+            [
+                (span.text, span.begin_offset, span.end_offset, span.start_time, span.end_time)
+                for span in result.output.spans
+            ],
+            [
+                ("IU's Media", 0, 10, 0.0, 0.5),
+                ("School", 11, 17, 0.6, 0.8),
+            ],
+        )
+
+    def test_realtime_entities_rejects_transcript_without_words(self) -> None:
+        comprehend = FakeComprehendRealtimeClient([])
+
+        with self.assertRaisesRegex(ValueError, "transcript.words is required"):
+            extract_named_entities_realtime_from_transcript(
+                Transcript(),
+                comprehend_client=comprehend,
+            )
+
+        self.assertEqual(comprehend.requests, [])
+
     def test_extract_named_entities_uploads_transcript_text_and_aligns_timestamps(self) -> None:
         comprehend = FakeComprehendClient()
         s3 = FakeS3Client()
