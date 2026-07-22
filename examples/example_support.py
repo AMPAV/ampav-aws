@@ -5,6 +5,8 @@ from typing import Any
 
 import yaml
 
+from ampav.core.schema import ToolOutput, Transcript
+
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = EXAMPLES_DIR / "config" / "aws_config.yaml"
@@ -29,3 +31,14 @@ def write_tool_output(filename: str, output: Any) -> Path:
     path = DATA_DIR / filename
     path.write_text(output.model_dump_yaml(sort_keys=False))
     return path
+
+
+def load_transcript(path: Path) -> Transcript:
+    """Load a Transcript payload from a saved ToolOutput YAML file."""
+    data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected ToolOutput YAML mapping in {path}")
+    output = ToolOutput.model_validate(data)
+    if not isinstance(output.output, Transcript):
+        raise ValueError(f"Expected transcript ToolOutput at {path}")
+    return output.output

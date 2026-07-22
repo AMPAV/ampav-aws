@@ -2,18 +2,19 @@
 
 AWS tooling for AMPAV.
 
-## AWS Transcribe
+`ampav-aws` provides thin AWS clients plus CLI, pipeline-adapter, and example
+code. AWS Transcribe returns AMPAV `ToolOutput` objects containing a
+`Transcript`. AWS Comprehend supports asynchronous S3-based named-entity jobs
+and synchronous real-time analysis of plain text; both return `NamedEntities`.
 
-`ampav-aws` provides small AWS clients plus CLI/example code. AWS Transcribe
-returns AMPAV `ToolOutput` objects whose `output` is an AMPAV `Transcript`.
-
-The library API is job-oriented: submit a job, wait for completion, fetch the
-result, and clean up AWS-side job records/resources owned by the tool. Library
-methods expect provider-native inputs such as `s3://bucket/key`. Local file
-upload, config loading, and artifact persistence are client concerns handled by
-CLI, examples, or application code.
+Asynchronous library APIs are job-oriented and accept provider-native inputs
+such as `s3://bucket/key`. Real-time Comprehend accepts text directly and
+chunks long input within the tool. Local file handling, config loading, and
+artifact persistence remain client concerns.
 
 ## Python API
+
+### AWS Transcribe
 
 Use an existing S3 media object:
 
@@ -40,6 +41,39 @@ Pass `include_tool_private=True` when constructing the tool only when you need
 raw AWS job/transcript data for troubleshooting. Normal client code should use
 `ToolOutput.output`.
 
+### AWS Comprehend named entities
+
+For synchronous analysis without S3, use the real-time tool directly:
+
+```python
+from ampav.aws import AwsComprehendNamedEntitiesRealtime
+
+tool = AwsComprehendNamedEntitiesRealtime(
+    region_name="us-east-2",
+    profile_name="my-profile",
+    chunk_overlap_bytes=1_000,
+)
+result = tool.process(
+    "Dr. Maya Chen visited Indiana University in Bloomington.",
+    language_code="en",
+)
+
+print(result.output.spans)
+```
+
+`max_chunk_bytes` defaults to AWS's built-in real-time document limit and may
+be lowered for a specific application. Long inputs are reassembled into one
+`NamedEntities` output whose offsets refer to the complete original text.
+
+Use `AwsComprehendNamedEntities` for asynchronous S3-based batch processing.
+
+## Pipeline adapters
+
+`ampav_aws_pipeline.extract_named_entities_realtime_from_transcript(...)`
+builds canonical text from `Transcript.words`, calls the real-time tool without
+S3, and aligns entity timestamps after chunk reassembly. The existing
+`extract_named_entities(...)` adapter remains the blocking batch/S3 path.
+
 ## CLI
 
 The CLI is a thin wrapper over the Python API:
@@ -47,6 +81,7 @@ The CLI is a thin wrapper over the Python API:
 ```bash
 ampav_aws_transcribe -h
 ampav_aws_comprehend_named_entities -h
+ampav_aws_comprehend_named_entities_realtime -h
 ```
 
 ```bash
@@ -75,6 +110,16 @@ ampav_aws_comprehend_named_entities input.txt \
   --region us-east-2
 ```
 
+For real-time Comprehend analysis of a local UTF-8 text file, no S3 bucket or
+data-access role is needed:
+
+```bash
+ampav_aws_comprehend_named_entities_realtime input.txt \
+  --language-code en \
+  --chunk-overlap-bytes 1000 \
+  --region us-east-2
+```
+
 Do not put AWS secret keys on the command line. Use boto3-native auth:
 
 - AWS profile via `--profile`
@@ -97,10 +142,22 @@ defaults. For local testing, copy `examples/` outside the repo, copy
 `config/aws_config.example.yaml` to `config/aws_config.yaml`, update the copied
 config for your AWS account, then run the copied scripts.
 
-- `aws_transcribe_file_example.py`: upload `data/AMP-Intro.m4a`, transcribe it using copied config, and write a `ToolOutput` YAML file.
-- `aws_transcribe_s3_example.py`: transcribe an existing `s3://` media URI using standard boto3 profile/region settings and write a `ToolOutput` YAML file.
-- `aws_comprehend_named_entities_transcript_example.py`: read `data/AMP-Intro-Transcript.yaml`, extract named entities using copied config, and write a `ToolOutput` YAML file.
-- `aws_comprehend_named_entities_s3_example.py`: extract named entities from an existing `s3://` text object using standard boto3 profile/region settings and write a `ToolOutput` YAML file.
+- `aws_transcribe_file_example.py`: upload `data/AMP-Intro.m4a`, transcribe it
+  using copied config, and write a `ToolOutput` YAML file.
+- `aws_transcribe_s3_example.py`: transcribe an existing `s3://` media URI
+  using standard boto3 profile/region settings and write a `ToolOutput` YAML
+  file.
+- `aws_comprehend_named_entities_transcript_example.py`: read
+  `data/AMP-Intro-Transcript.yaml`, extract named entities using copied config,
+  and write a `ToolOutput` YAML file.
+- `aws_comprehend_named_entities_s3_example.py`: extract named entities from an
+  existing `s3://` text object using standard boto3 profile/region settings and
+  write a `ToolOutput` YAML file.
+- `aws_comprehend_named_entities_realtime_text_example.py`: extract named
+  entities directly from a text string without S3.
+- `aws_comprehend_named_entities_realtime_transcript_example.py`: extract named
+  entities from `data/AMP-Intro-Transcript.yaml` without S3 and align entity
+  timestamps.
 - `config/aws_config.example.yaml`: sample shared AWS config for examples.
 - `data/`: small curated inputs and checked-in example outputs.
 

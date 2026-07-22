@@ -1,6 +1,6 @@
 [project]
 name = "ampav-aws"
-version = "0.0.7"
+version = "0.0.8"
 description = "AWS tooling for the AMPAV environment"
 readme = "README.md"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ authors = [
 
 requires-python = ">=3.12"
 dependencies = [
-    "ampav-core>=0.0.17,<0.0.18",
+    "ampav-core>=0.0.18,<0.0.19",
 ]
 
 [project.urls]
@@ -25,6 +25,7 @@ Issues = "https://github.com/AMPAV/ampav-aws/issues"
 [project.scripts]
 ampav_aws_transcribe = "ampav_aws_cli.transcribe:main"
 ampav_aws_comprehend_named_entities = "ampav_aws_cli.comprehend_named_entities:main"
+ampav_aws_comprehend_named_entities_realtime = "ampav_aws_cli.comprehend_named_entities_realtime:main"
 
 [tool.setuptools.packages.find]
 include = ["ampav*", "ampav_aws_cli*", "ampav_aws_pipeline*"]

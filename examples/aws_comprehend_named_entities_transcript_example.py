@@ -5,12 +5,9 @@ aws_transcribe_file_example.py first, then run this script from the copied
 directory using the same config/aws_config.yaml file.
 """
 
-import yaml
-
-from ampav.core.schema import ToolOutput, Transcript
 from ampav_aws_pipeline.comprehend import extract_named_entities
 
-from example_support import DATA_DIR, load_config, write_tool_output
+from example_support import DATA_DIR, load_config, load_transcript, write_tool_output
 
 
 INPUT_FILE = DATA_DIR / "AMP-Intro-Transcript.yaml"
@@ -59,18 +56,5 @@ def main() -> None:
 
     output_path = write_tool_output(OUTPUT_FILE, result)
     print(f"Wrote {output_path}")
-
-
-def load_transcript(path) -> Transcript:
-    """Load the Transcript payload from a saved ToolOutput YAML file."""
-    data = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected ToolOutput YAML mapping in {path}")
-    output = ToolOutput.model_validate(data)
-    if not isinstance(output.output, Transcript):
-        raise ValueError(f"Expected transcript ToolOutput at {path}")
-    return output.output
-
-
 if __name__ == "__main__":
     main()

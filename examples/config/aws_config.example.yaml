@@ -34,3 +34,9 @@ comprehend_named_entities:
   output_prefix: aws_comprehend_named_entities/output
   language_code: en
   job_name_suffix: AMP-Intro
+
+comprehend_named_entities_realtime:
+  language_code: en
+  max_chunk_bytes: 100000
+  chunk_overlap_bytes: 1000
+  include_tool_private: false
