@@ -281,7 +281,7 @@ class AwsComprehendNamedEntitiesApiTest(unittest.TestCase):
         )
 
         self.assertEqual(commercial_item.label, "COMMERCIAL_ITEM")
-        self.assertEqual(commercial_item.type, NamedEntityType.COMMERCIAL_ITEM)
+        self.assertEqual(commercial_item.type, NamedEntityType.BRAND)
         self.assertEqual(custom.label, "PRODUCT_CODE")
         self.assertEqual(custom.type, NamedEntityType.OTHER)
 

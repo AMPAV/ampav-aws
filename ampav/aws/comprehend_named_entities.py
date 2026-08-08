@@ -430,8 +430,11 @@ def aws_entity_to_named_entity(
 
 def _named_entity_type_for_label(label: str) -> NamedEntityType:
     """Map a native Comprehend label to the AMPAV canonical type."""
+    normalized_label = label.strip().casefold()
+    if normalized_label == "commercial_item":
+        return NamedEntityType.BRAND
     try:
-        return NamedEntityType(label.strip().casefold())
+        return NamedEntityType(normalized_label)
     except ValueError:
         # Custom Comprehend recognizers may return caller-defined labels.
         return NamedEntityType.OTHER
