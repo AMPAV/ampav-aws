@@ -18,7 +18,7 @@ from ampav.core.text_chunking import (
 )
 
 from ._version import DISTRIBUTION_NAME, __version__
-from .comprehend_named_entities import aws_entity_to_named_entity
+from .comprehend_named_entities_conversion import aws_entities_to_named_entities
 from .errors import (
     AwsComprehendNamedEntitiesError,
     AwsComprehendNamedEntitiesSchemaError,
@@ -159,10 +159,10 @@ class AwsComprehendNamedEntitiesRealtime:
                 chunk.text,
                 language_code=language_code,
             )
-            entities = _response_to_named_entities(
-                response,
-                language_code=language_code,
-                path=f"$.chunks[{chunk_index}].response",
+            entities = aws_entities_to_named_entities(
+                response.get("Entities"),
+                language=language_code,
+                path=f"$.chunks[{chunk_index}].response.Entities",
             )
             chunk_outputs.append((chunk, entities))
             if self.include_tool_private:
@@ -215,29 +215,6 @@ class AwsComprehendNamedEntitiesRealtime:
                 "expected JSON object",
             )
         return response
-
-
-def _response_to_named_entities(
-    response: dict[str, Any],
-    *,
-    language_code: str,
-    path: str,
-) -> list[NamedEntity]:
-    """Strictly convert one chunk-local ``DetectEntities`` response."""
-    native_entities = response.get("Entities")
-    if not isinstance(native_entities, list):
-        raise AwsComprehendNamedEntitiesSchemaError(
-            f"{path}.Entities",
-            "expected list",
-        )
-    return [
-        aws_entity_to_named_entity(
-            entity,
-            language=language_code,
-            path=f"{path}.Entities[{index}]",
-        )
-        for index, entity in enumerate(native_entities)
-    ]
 
 
 def _private_chunk(chunk: TextChunk, response: dict[str, Any]) -> dict[str, Any]:

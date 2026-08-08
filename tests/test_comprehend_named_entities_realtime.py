@@ -2,7 +2,7 @@ import unittest
 
 from botocore.exceptions import ClientError
 
-from ampav.core.schema import NamedEntities
+from ampav.core.schema import NamedEntities, NamedEntityType
 
 from ampav.aws import AwsComprehendNamedEntitiesRealtime, __version__
 from ampav.aws.comprehend_named_entities_realtime import (
@@ -80,7 +80,8 @@ class AwsComprehendNamedEntitiesRealtimeTest(unittest.TestCase):
             [
                 (
                     entity.text,
-                    entity.entity_type,
+                    entity.label,
+                    entity.type,
                     entity.confidence,
                     entity.begin_offset,
                     entity.end_offset,
@@ -89,8 +90,8 @@ class AwsComprehendNamedEntitiesRealtimeTest(unittest.TestCase):
                 for entity in result.output.spans
             ],
             [
-                ("Maya Chen", "PERSON", 0.99, 0, 9, "en"),
-                ("Amazon", "ORGANIZATION", 0.98, 14, 20, "en"),
+                ("Maya Chen", "PERSON", NamedEntityType.PERSON, 0.99, 0, 9, "en"),
+                ("Amazon", "ORGANIZATION", NamedEntityType.ORGANIZATION, 0.98, 14, 20, "en"),
             ],
         )
 

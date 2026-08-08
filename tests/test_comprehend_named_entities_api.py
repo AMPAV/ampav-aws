@@ -5,10 +5,13 @@ import unittest
 from datetime import datetime, timezone
 
 from ampav.core.async_tool import AsyncStatusCode
-from ampav.core.schema import NamedEntities
+from ampav.core.schema import NamedEntities, NamedEntityType
 
 from ampav.aws import __version__
-from ampav.aws.comprehend_named_entities import AwsComprehendNamedEntities, parse_output_archive
+from ampav.aws.comprehend_named_entities import (
+    AwsComprehendNamedEntities,
+    parse_output_archive,
+)
 from ampav.aws.errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
 from ampav.aws.job import AwsJobStatus
 
@@ -220,12 +223,28 @@ class AwsComprehendNamedEntitiesApiTest(unittest.TestCase):
         self.assertEqual(result.output.languages, ["en"])
         self.assertEqual(
             [
-                (entity.text, entity.entity_type, entity.confidence, entity.begin_offset, entity.end_offset, entity.language)
+                (
+                    entity.text,
+                    entity.label,
+                    entity.type,
+                    entity.confidence,
+                    entity.begin_offset,
+                    entity.end_offset,
+                    entity.language,
+                )
                 for entity in result.output.spans
             ],
             [
-                ("Maya Chen", "PERSON", 0.99, 0, 10, "en"),
-                ("Indiana University", "ORGANIZATION", 0.98, 15, 33, "en"),
+                ("Maya Chen", "PERSON", NamedEntityType.PERSON, 0.99, 0, 10, "en"),
+                (
+                    "Indiana University",
+                    "ORGANIZATION",
+                    NamedEntityType.ORGANIZATION,
+                    0.98,
+                    15,
+                    33,
+                    "en",
+                ),
             ],
         )
         self.assertEqual(result.parameters["archive_members"], ["output"])
