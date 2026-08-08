@@ -5,10 +5,14 @@ import unittest
 from datetime import datetime, timezone
 
 from ampav.core.async_tool import AsyncStatusCode
-from ampav.core.schema import NamedEntities
+from ampav.core.schema import NamedEntities, NamedEntityType
 
 from ampav.aws import __version__
-from ampav.aws.comprehend_named_entities import AwsComprehendNamedEntities, parse_output_archive
+from ampav.aws.comprehend_named_entities import (
+    AwsComprehendNamedEntities,
+    aws_entity_to_named_entity,
+    parse_output_archive,
+)
 from ampav.aws.errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
 from ampav.aws.job import AwsJobStatus
 
@@ -220,12 +224,28 @@ class AwsComprehendNamedEntitiesApiTest(unittest.TestCase):
         self.assertEqual(result.output.languages, ["en"])
         self.assertEqual(
             [
-                (entity.text, entity.entity_type, entity.confidence, entity.begin_offset, entity.end_offset, entity.language)
+                (
+                    entity.text,
+                    entity.label,
+                    entity.type,
+                    entity.confidence,
+                    entity.begin_offset,
+                    entity.end_offset,
+                    entity.language,
+                )
                 for entity in result.output.spans
             ],
             [
-                ("Maya Chen", "PERSON", 0.99, 0, 10, "en"),
-                ("Indiana University", "ORGANIZATION", 0.98, 15, 33, "en"),
+                ("Maya Chen", "PERSON", NamedEntityType.PERSON, 0.99, 0, 10, "en"),
+                (
+                    "Indiana University",
+                    "ORGANIZATION",
+                    NamedEntityType.ORGANIZATION,
+                    0.98,
+                    15,
+                    33,
+                    "en",
+                ),
             ],
         )
         self.assertEqual(result.parameters["archive_members"], ["output"])
@@ -239,6 +259,31 @@ class AwsComprehendNamedEntitiesApiTest(unittest.TestCase):
                 ("out", "output/job/output.tar.gz"),
             ],
         )
+
+    def test_entity_conversion_maps_known_and_custom_labels(self) -> None:
+        commercial_item = aws_entity_to_named_entity(
+            {
+                "Text": "Kindle",
+                "Type": "COMMERCIAL_ITEM",
+                "Score": 0.9,
+                "BeginOffset": 0,
+                "EndOffset": 6,
+            }
+        )
+        custom = aws_entity_to_named_entity(
+            {
+                "Text": "ENG-42",
+                "Type": "PRODUCT_CODE",
+                "Score": 0.8,
+                "BeginOffset": 0,
+                "EndOffset": 6,
+            }
+        )
+
+        self.assertEqual(commercial_item.label, "COMMERCIAL_ITEM")
+        self.assertEqual(commercial_item.type, NamedEntityType.COMMERCIAL_ITEM)
+        self.assertEqual(custom.label, "PRODUCT_CODE")
+        self.assertEqual(custom.type, NamedEntityType.OTHER)
 
     def test_process_polls_until_completion_and_returns_tool_output(self) -> None:
         comprehend = FakeComprehendClient(statuses=["IN_PROGRESS", "COMPLETED"])

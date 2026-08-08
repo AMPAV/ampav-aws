@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
-from ampav.core.schema import NamedEntities, NamedEntity, ToolOutput
+from ampav.core.schema import NamedEntities, NamedEntity, NamedEntityType, ToolOutput
 
 from ._version import __version__
 from .errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
@@ -409,9 +409,11 @@ def aws_entity_to_named_entity(
     if not isinstance(entity, dict):
         raise AwsComprehendNamedEntitiesSchemaError(path, "expected JSON object")
     try:
+        label = str(entity["Type"])
         return NamedEntity(
             text=str(entity["Text"]),
-            entity_type=str(entity["Type"]),
+            type=_named_entity_type_for_label(label),
+            label=label,
             confidence=None if entity.get("Score") is None else float(entity["Score"]),
             begin_offset=int(entity["BeginOffset"]),
             end_offset=int(entity["EndOffset"]),
@@ -424,6 +426,15 @@ def aws_entity_to_named_entity(
         ) from exc
     except (TypeError, ValueError, ValidationError) as exc:
         raise AwsComprehendNamedEntitiesSchemaError(path, f"invalid entity data: {exc}") from exc
+
+
+def _named_entity_type_for_label(label: str) -> NamedEntityType:
+    """Map a native Comprehend label to the AMPAV canonical type."""
+    try:
+        return NamedEntityType(label.strip().casefold())
+    except ValueError:
+        # Custom Comprehend recognizers may return caller-defined labels.
+        return NamedEntityType.OTHER
 
 
 def get_output_s3_uri(raw_job: dict[str, Any]) -> str:
