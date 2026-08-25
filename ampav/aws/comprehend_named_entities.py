@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from ampav.core.async_tool import AsyncJobStatus, AsyncStatusCode, AsyncTool
 from ampav.core.schema import NamedEntities, ToolOutput
 
-from ._version import __version__
+from . import __version__
 from .comprehend_named_entities_conversion import aws_entities_to_named_entities
 from .errors import AwsComprehendNamedEntitiesError, AwsComprehendNamedEntitiesSchemaError
 from .job import AwsJobStatus
