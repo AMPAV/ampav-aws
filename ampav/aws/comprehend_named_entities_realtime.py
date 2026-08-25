@@ -17,7 +17,7 @@ from ampav.core.text_chunking import (
     text_to_units,
 )
 
-from ._version import DISTRIBUTION_NAME, __version__
+from . import DISTRIBUTION_NAME, __version__
 from .comprehend_named_entities_conversion import aws_entities_to_named_entities
 from .errors import (
     AwsComprehendNamedEntitiesError,
