@@ -35,3 +35,10 @@ class AwsComprehendNamedEntitiesSchemaError(AwsComprehendNamedEntitiesError):
     def __init__(self, path: str, message: str):
         self.path = path
         super().__init__(None, f"{path}: {message}")
+
+
+class AwsComprehendPiiError(ToolError):
+    """Raised when the AWS Comprehend PII detection request fails."""
+
+    def __init__(self, message: str):
+        super().__init__(f"AWS Comprehend PII: {message}")

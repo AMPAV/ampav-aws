@@ -49,3 +49,22 @@ Reference-keyword JSON may be a list of strings or objects containing `text`.
 An optional `instances` list is used only to report an occurrence count. The
 calculated counts and overlaps are structural diagnostics, not accuracy or
 quality measurements.
+
+## AWS Comprehend PII
+
+`comprehend_pii.py` probes the native synchronous `DetectPiiEntities` API. It
+preserves the complete provider response and does not define an AMPAV PII
+schema. Use only synthetic or sanitized text.
+
+```bash
+../.venv/bin/python experiments/comprehend_pii.py \
+  ../.work/ampav-aws/data/synthetic-pii.txt \
+  ../.work/ampav-aws/runs/comprehend-pii-synthetic-native \
+  --fixture-id synthetic-pii \
+  --profile PROFILE \
+  --region REGION
+```
+
+The synchronous API creates no remote artifacts. The retained run contains the
+complete native JSON response, a parameter and version manifest, and a short
+observation template for the adoption decision.
