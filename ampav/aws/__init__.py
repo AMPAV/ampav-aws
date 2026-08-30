@@ -6,6 +6,7 @@ DISTRIBUTION_NAME = "ampav-aws"
 from .comprehend_named_entities import AwsComprehendNamedEntities
 from .comprehend_named_entities_realtime import AwsComprehendNamedEntitiesRealtime
 from .job import AwsJobStatus
+from .rekognition_face_detection import AwsRekognitionFaceDetection
 from .rekognition_label_detection import AwsRekognitionLabelDetection
 from .rekognition_segment_detection import AwsRekognitionSegmentDetection
 from .rekognition_text_detection import AwsRekognitionVideoTextDetection
@@ -16,6 +17,7 @@ __all__ = [
     "AwsComprehendNamedEntities",
     "AwsComprehendNamedEntitiesRealtime",
     "AwsJobStatus",
+    "AwsRekognitionFaceDetection",
     "AwsRekognitionLabelDetection",
     "AwsRekognitionSegmentDetection",
     "AwsRekognitionVideoTextDetection",
