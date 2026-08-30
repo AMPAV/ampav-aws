@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from experiments.rekognition_text_detection import fetch_all_text_pages, summarize_pages, wait_for_terminal_response
+from ampav.aws.rekognition_text_detection import AwsRekognitionVideoTextDetection
+from experiments.rekognition_text_detection import summarize_pages
 
 
 class FakeClient:
@@ -18,17 +20,19 @@ class FakeClient:
 
 
 class RekognitionTextDetectionProbeTest(unittest.TestCase):
-    def test_waits_for_native_success(self) -> None:
+    def test_wrapper_waits_for_native_success(self) -> None:
         client = FakeClient([{"JobStatus": "IN_PROGRESS"}, {"JobStatus": "SUCCEEDED"}])
-        clock = iter([0.0, 0.0])
-        terminal, history = wait_for_terminal_response(client, "job", polling_interval=1, timeout=10, sleep=lambda _: None, monotonic=lambda: next(clock))
+        tool = AwsRekognitionVideoTextDetection(rekognition_client=client, polling_interval=1, timeout=10)
+        with patch("ampav.aws.rekognition_text_detection.time.sleep"):
+            terminal, history = tool.wait_for_terminal_response("job")
         self.assertEqual(terminal["JobStatus"], "SUCCEEDED")
         self.assertEqual(len(history), 2)
 
-    def test_preserves_pagination(self) -> None:
+    def test_wrapper_preserves_pagination(self) -> None:
         first = {"JobStatus": "SUCCEEDED", "NextToken": "more", "TextDetections": []}
         client = FakeClient([{"JobStatus": "SUCCEEDED", "TextDetections": []}])
-        self.assertEqual(fetch_all_text_pages(client, "job", first_response=first), [first, {"JobStatus": "SUCCEEDED", "TextDetections": []}])
+        tool = AwsRekognitionVideoTextDetection(rekognition_client=client)
+        self.assertEqual(tool.get_all_pages("job", first_response=first), [first, {"JobStatus": "SUCCEEDED", "TextDetections": []}])
         self.assertEqual(client.calls[0]["NextToken"], "more")
 
     def test_reports_repetition_and_native_fields(self) -> None:

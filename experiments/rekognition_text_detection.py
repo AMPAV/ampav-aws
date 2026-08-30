@@ -11,21 +11,19 @@ from pathlib import Path
 import shlex
 import statistics
 import sys
-import time
 from time import perf_counter
 from typing import Any
 
-import boto3
 import yaml
 
-from ampav.aws.s3 import parse_s3_uri
+from ampav.aws.rekognition_text_detection import (
+    AwsRekognitionVideoTextDetection,
+    job_id_from_start_response,
+)
 
 
 TASK = "AMPAV-189"
 JOB_TAG = "ampav-aws-rekognition-text"
-MAX_RESULTS = 1_000
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Probe native Rekognition Video text detection.")
     parser.add_argument("input_s3_uri")
@@ -42,26 +40,23 @@ def main() -> None:
     print(json.dumps(run_probe(parse_args()), indent=2, ensure_ascii=False))
 
 
-def run_probe(args: argparse.Namespace, *, client: Any | None = None) -> dict[str, Any]:
+def run_probe(args: argparse.Namespace, *, tool: AwsRekognitionVideoTextDetection | None = None) -> dict[str, Any]:
     """Submit, wait for, and retain one native text-detection job."""
     _validate_args(args)
     _prepare_output_dir(args.output_dir)
-    location = parse_s3_uri(args.input_s3_uri)
-    if client is None:
-        session = boto3.Session(profile_name=args.profile, region_name=args.region)
-        client = session.client("rekognition")
-    request = {
-        "Video": {"S3Object": {"Bucket": location.bucket, "Name": location.key}},
-        "JobTag": JOB_TAG,
-    }
+    if tool is None:
+        tool = AwsRekognitionVideoTextDetection(
+            profile_name=args.profile,
+            region_name=args.region,
+            polling_interval=args.polling_interval,
+            timeout=args.timeout,
+        )
     started_at = datetime.now(timezone.utc)
     started = perf_counter()
-    start_response = client.start_text_detection(**request)
+    start_response = tool.start(args.input_s3_uri, job_tag=JOB_TAG)
     _write_json(args.output_dir / "start_response.json", start_response)
-    job_id = _job_id(start_response)
-    terminal, history = wait_for_terminal_response(
-        client, job_id, polling_interval=args.polling_interval, timeout=args.timeout
-    )
+    job_id = job_id_from_start_response(start_response)
+    terminal, history = tool.wait_for_terminal_response(job_id)
     completed_at = datetime.now(timezone.utc)
     _write_json(args.output_dir / "status_history.json", history)
     if terminal.get("JobStatus") != "SUCCEEDED":
@@ -70,7 +65,7 @@ def run_probe(args: argparse.Namespace, *, client: Any | None = None) -> dict[st
             f"Rekognition text-detection job {job_id} ended with {terminal.get('JobStatus')!r}: "
             f"{terminal.get('StatusMessage') or 'no status message'}"
         )
-    pages = fetch_all_text_pages(client, job_id, first_response=terminal)
+    pages = tool.get_all_pages(job_id, first_response=terminal)
     _write_json(args.output_dir / "native_text_detection_pages.json", pages)
     summary = summarize_pages(pages)
     manifest = {
@@ -90,7 +85,7 @@ def run_probe(args: argparse.Namespace, *, client: Any | None = None) -> dict[st
         "effective_parameters": {
             "input_s3_uri": args.input_s3_uri,
             "job_tag": JOB_TAG,
-            "region": getattr(getattr(client, "meta", None), "region_name", None) or args.region,
+            "region": getattr(getattr(tool.rekognition_client, "meta", None), "region_name", None) or args.region,
             "polling_interval_seconds": args.polling_interval,
             "timeout_seconds": args.timeout,
         },
@@ -115,40 +110,6 @@ def run_probe(args: argparse.Namespace, *, client: Any | None = None) -> dict[st
         encoding="utf-8",
     )
     return {"output_dir": str(args.output_dir.resolve()), "job_id": job_id, "summary": summary}
-
-
-def wait_for_terminal_response(
-    client: Any, job_id: str, *, polling_interval: float, timeout: float,
-    sleep: Any = time.sleep, monotonic: Any = time.monotonic,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Poll the direct native job until it reaches a terminal state."""
-    started = monotonic()
-    history: list[dict[str, Any]] = []
-    while True:
-        response = client.get_text_detection(JobId=job_id, MaxResults=MAX_RESULTS)
-        if not isinstance(response, dict):
-            raise TypeError("GetTextDetection must return a mapping")
-        history.append(response)
-        if response.get("JobStatus") in {"SUCCEEDED", "FAILED"}:
-            return response, history
-        if monotonic() - started > timeout:
-            raise TimeoutError(f"Rekognition text-detection job {job_id} did not finish within {timeout} seconds")
-        sleep(polling_interval)
-
-
-def fetch_all_text_pages(client: Any, job_id: str, *, first_response: dict[str, Any]) -> list[dict[str, Any]]:
-    """Preserve each native result page rather than merging its detections."""
-    pages = [first_response]
-    token = first_response.get("NextToken")
-    while token:
-        if not isinstance(token, str):
-            raise TypeError("GetTextDetection NextToken must be a string")
-        response = client.get_text_detection(JobId=job_id, MaxResults=MAX_RESULTS, NextToken=token)
-        if not isinstance(response, dict):
-            raise TypeError("GetTextDetection must return a mapping")
-        pages.append(response)
-        token = response.get("NextToken")
-    return pages
 
 
 def summarize_pages(pages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -201,13 +162,6 @@ def _prepare_output_dir(output_dir: Path) -> None:
 def _validate_args(args: argparse.Namespace) -> None:
     if args.polling_interval <= 0 or args.timeout <= 0:
         raise ValueError("polling_interval and timeout must be greater than 0")
-
-
-def _job_id(response: dict[str, Any]) -> str:
-    value = response.get("JobId")
-    if not isinstance(value, str) or not value:
-        raise ValueError("StartTextDetection response must contain a non-empty JobId")
-    return value
 
 
 def _write_json(path: Path, value: Any) -> None:
