@@ -15,21 +15,21 @@ import json
 from pathlib import Path
 import shlex
 import sys
-import time
 from time import perf_counter
 from typing import Any
 
-import boto3
 import yaml
 
-from ampav.aws.s3 import parse_s3_uri
+from ampav.aws.rekognition_segment_detection import (
+    AwsRekognitionSegmentDetection,
+    job_id_from_start_response,
+)
 
 
 TASK = "AMPAV-188"
 DEFAULT_SEGMENT_TYPES = ("SHOT", "TECHNICAL_CUE")
 DEFAULT_POLLING_INTERVAL = 30.0
 DEFAULT_TIMEOUT = 7_200.0
-MAX_RESULTS = 1_000
 JOB_TAG = "ampav-aws-rekognition-segment"
 
 
@@ -71,30 +71,22 @@ def main() -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def run_probe(args: argparse.Namespace, *, client: Any | None = None) -> dict[str, Any]:
+def run_probe(args: argparse.Namespace, *, tool: AwsRekognitionSegmentDetection | None = None) -> dict[str, Any]:
     """Submit, wait for, and retain one native segment-detection job."""
     _validate_args(args)
     _prepare_output_dir(args.output_dir)
-    location = parse_s3_uri(args.input_s3_uri)
     segment_types = tuple(args.segment_types or DEFAULT_SEGMENT_TYPES)
-    if client is None:
-        session = boto3.Session(region_name=args.region, profile_name=args.profile)
-        client = session.client("rekognition")
-    effective_region = getattr(getattr(client, "meta", None), "region_name", None) or args.region
-
-    request = build_start_segment_detection_request(location.bucket, location.key, segment_types)
+    if tool is None:
+        tool = AwsRekognitionSegmentDetection(region_name=args.region, profile_name=args.profile,
+                                               polling_interval=args.polling_interval, timeout=args.timeout)
+    effective_region = getattr(getattr(tool.rekognition_client, "meta", None), "region_name", None) or args.region
     started_at = datetime.now(timezone.utc)
     started = perf_counter()
-    start_response = client.start_segment_detection(**request)
+    start_response = tool.start(args.input_s3_uri, segment_types=segment_types, job_tag=JOB_TAG)
     _write_json(args.output_dir / "start_response.json", start_response)
-    job_id = _require_job_id(start_response)
+    job_id = job_id_from_start_response(start_response)
 
-    terminal_response, status_history = wait_for_terminal_response(
-        client,
-        job_id,
-        polling_interval=args.polling_interval,
-        timeout=args.timeout,
-    )
+    terminal_response, status_history = tool.wait_for_terminal_response(job_id)
     elapsed_seconds = perf_counter() - started
     completed_at = datetime.now(timezone.utc)
     _write_json(args.output_dir / "status_history.json", status_history)
@@ -117,7 +109,7 @@ def run_probe(args: argparse.Namespace, *, client: Any | None = None) -> dict[st
             f"{terminal_response.get('StatusMessage') or 'no status message'}"
         )
 
-    pages = fetch_all_segment_pages(client, job_id, first_response=terminal_response)
+    pages = tool.get_all_pages(job_id, first_response=terminal_response)
     _write_json(args.output_dir / "native_segment_detection_pages.json", pages)
     summary = summarize_pages(pages)
     manifest = {
@@ -179,73 +171,6 @@ def run_probe(args: argparse.Namespace, *, client: Any | None = None) -> dict[st
     }
 
 
-def build_start_segment_detection_request(
-    bucket: str,
-    key: str,
-    segment_types: tuple[str, ...],
-) -> dict[str, Any]:
-    """Build the direct native ``StartSegmentDetection`` request."""
-    return {
-        "Video": {"S3Object": {"Bucket": bucket, "Name": key}},
-        "SegmentTypes": list(segment_types),
-        "JobTag": JOB_TAG,
-    }
-
-
-def wait_for_terminal_response(
-    client: Any,
-    job_id: str,
-    *,
-    polling_interval: float,
-    timeout: float,
-    sleep: Any = time.sleep,
-    monotonic: Any = time.monotonic,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Poll the native job until it reaches a terminal status."""
-    started = monotonic()
-    history: list[dict[str, Any]] = []
-    while True:
-        response = client.get_segment_detection(
-            JobId=job_id,
-            MaxResults=MAX_RESULTS,
-        )
-        if not isinstance(response, dict):
-            raise TypeError("GetSegmentDetection must return a mapping")
-        history.append(response)
-        status = response.get("JobStatus")
-        if status in {"SUCCEEDED", "FAILED"}:
-            return response, history
-        if monotonic() - started > timeout:
-            raise TimeoutError(
-                f"Rekognition segment-detection job {job_id} did not finish within {timeout} seconds"
-            )
-        sleep(polling_interval)
-
-
-def fetch_all_segment_pages(
-    client: Any,
-    job_id: str,
-    *,
-    first_response: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Return each native response page without merging or reshaping segments."""
-    pages = [first_response]
-    token = first_response.get("NextToken")
-    while token:
-        if not isinstance(token, str):
-            raise TypeError("GetSegmentDetection NextToken must be a string")
-        response = client.get_segment_detection(
-            JobId=job_id,
-            MaxResults=MAX_RESULTS,
-            NextToken=token,
-        )
-        if not isinstance(response, dict):
-            raise TypeError("GetSegmentDetection must return a mapping")
-        pages.append(response)
-        token = response.get("NextToken")
-    return pages
-
-
 def summarize_pages(pages: list[dict[str, Any]]) -> dict[str, Any]:
     """Report structural native fields for direct qualitative review."""
     segments = [
@@ -301,13 +226,6 @@ def _prepare_output_dir(output_dir: Path) -> None:
             raise FileExistsError(f"output directory is not empty: {output_dir}")
         return
     output_dir.mkdir(parents=True)
-
-
-def _require_job_id(response: dict[str, Any]) -> str:
-    job_id = response.get("JobId")
-    if not isinstance(job_id, str) or not job_id:
-        raise ValueError("StartSegmentDetection response must contain a non-empty JobId")
-    return job_id
 
 
 def _write_json(path: Path, value: Any) -> None:

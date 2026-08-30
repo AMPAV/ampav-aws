@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
+from ampav.aws.rekognition_segment_detection import AwsRekognitionSegmentDetection
 from experiments.rekognition_segment_detection import (
     DEFAULT_SEGMENT_TYPES,
     JOB_TAG,
-    build_start_segment_detection_request,
-    fetch_all_segment_pages,
     summarize_pages,
-    wait_for_terminal_response,
 )
 
 
@@ -18,6 +17,11 @@ class FakeRekognitionClient:
     def __init__(self, responses: list[dict[str, object]]):
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
+        self.started: list[dict[str, object]] = []
+
+    def start_segment_detection(self, **kwargs: object) -> dict[str, object]:
+        self.started.append(kwargs)
+        return {"JobId": "segment-job"}
 
     def get_segment_detection(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
@@ -25,32 +29,23 @@ class FakeRekognitionClient:
 
 
 class RekognitionSegmentDetectionProbeTest(unittest.TestCase):
-    def test_builds_native_request_for_both_segment_types(self) -> None:
+    def test_wrapper_builds_native_request_for_both_segment_types(self) -> None:
+        client = FakeRekognitionClient([])
+        AwsRekognitionSegmentDetection(rekognition_client=client).start("s3://media-bucket/input/demo.mp4", job_tag=JOB_TAG)
         self.assertEqual(
-            build_start_segment_detection_request(
-                "media-bucket", "input/demo.mp4", DEFAULT_SEGMENT_TYPES
-            ),
-            {
-                "Video": {"S3Object": {"Bucket": "media-bucket", "Name": "input/demo.mp4"}},
-                "SegmentTypes": ["SHOT", "TECHNICAL_CUE"],
-                "JobTag": JOB_TAG,
-            },
+            client.started,
+            [{
+                "Video": {"S3Object": {"Bucket": "media-bucket", "Name": "input/demo.mp4"}}, "SegmentTypes": ["SHOT", "TECHNICAL_CUE"], "JobTag": JOB_TAG,
+            }],
         )
 
     def test_waits_until_native_job_succeeds(self) -> None:
         client = FakeRekognitionClient(
             [{"JobStatus": "IN_PROGRESS"}, {"JobStatus": "SUCCEEDED", "Segments": []}]
         )
-        now = iter([0.0, 0.0, 1.0])
-
-        terminal, history = wait_for_terminal_response(
-            client,
-            "job-1",
-            polling_interval=0.1,
-            timeout=10,
-            sleep=lambda _: None,
-            monotonic=lambda: next(now),
-        )
+        tool = AwsRekognitionSegmentDetection(rekognition_client=client, polling_interval=0.1, timeout=10)
+        with patch("ampav.aws.rekognition_segment_detection.time.sleep"):
+            terminal, history = tool.wait_for_terminal_response("job-1")
 
         self.assertEqual(terminal["JobStatus"], "SUCCEEDED")
         self.assertEqual(len(history), 2)
@@ -63,7 +58,7 @@ class RekognitionSegmentDetectionProbeTest(unittest.TestCase):
         first = {"JobStatus": "SUCCEEDED", "Segments": [], "NextToken": "next"}
         client.responses = [{"JobStatus": "SUCCEEDED", "Segments": []}]
 
-        pages = fetch_all_segment_pages(client, "job-1", first_response=first)
+        pages = AwsRekognitionSegmentDetection(rekognition_client=client).get_all_pages("job-1", first_response=first)
 
         self.assertEqual(pages, [first, {"JobStatus": "SUCCEEDED", "Segments": []}])
         self.assertEqual(
