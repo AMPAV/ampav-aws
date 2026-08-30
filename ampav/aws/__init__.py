@@ -8,6 +8,7 @@ from .comprehend_named_entities_realtime import AwsComprehendNamedEntitiesRealti
 from .job import AwsJobStatus
 from .rekognition_label_detection import AwsRekognitionLabelDetection
 from .rekognition_segment_detection import AwsRekognitionSegmentDetection
+from .rekognition_text_detection import AwsRekognitionVideoTextDetection
 from .transcribe import AwsTranscribe, TranscriptionSettings
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "AwsJobStatus",
     "AwsRekognitionLabelDetection",
     "AwsRekognitionSegmentDetection",
+    "AwsRekognitionVideoTextDetection",
     "AwsTranscribe",
     "TranscriptionSettings",
 ]
